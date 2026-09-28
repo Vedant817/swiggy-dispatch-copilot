@@ -52,9 +52,13 @@ gen-burst:
 eval:
 	$(PY) evals/generate_suite.py --config configs/eval.yaml
 	$(PY) evals/runners/go_scenarios.py --config configs/eval.yaml
+	$(PY) evals/runners/agent_scenarios.py --config configs/eval.yaml
+
+eval-agent:
+	$(PY) evals/runners/agent_scenarios.py --config configs/eval.yaml
 
 load:
-	k6 run --env BASE_URL=http://127.0.0.1:8080 load/assign_latency.js
+	k6 run --env BASE_URL=http://127.0.0.1:8080 --env VUS=$(VUS) --env DURATION=$(DURATION) load/assign_latency.js
 
 demo:
 	bash scripts/demo.sh

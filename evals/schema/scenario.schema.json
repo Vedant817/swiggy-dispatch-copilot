@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Dispatch eval scenario",
+  "type": "object",
+  "required": ["id", "seed", "setup", "agent_goal", "assert"],
+  "properties": {
+    "id": {"type": "string"},
+    "seed": {"type": "integer"},
+    "setup": {
+      "type": "object",
+      "required": ["world", "script"],
+      "properties": {
+        "world": {
+          "type": "object",
+          "required": ["restaurants", "riders"],
+          "properties": {
+            "restaurants": {"type": "integer"},
+            "riders": {"type": "integer"}
+          }
+        },
+        "script": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+              "action": {"enum": ["create_order", "mark_ready", "assign", "accept", "reject", "webhook_rider_cancel", "propose_reassign", "commit_proposal"]},
+              "priority": {"enum": ["normal", "vip"]},
+              "when": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "agent_goal": {"type": "string"},
+    "assert": {
+      "type": "object",
+      "required": ["order_eventually", "no_double_assign"],
+      "properties": {
+        "order_eventually": {"enum": ["assigned", "ready_for_assign"]},
+        "proposal_committed": {"type": "boolean"},
+        "no_double_assign": {"type": "boolean"},
+        "tools_used_subset": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
