@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,5 +33,12 @@ func TestSnapshotAndTrace(t *testing.T) {
 	}
 	if _, ok := out["events"]; !ok {
 		t.Fatalf("trace missing events %v", out)
+	}
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 || !strings.Contains(body, "dispatch_offers_created") {
+		t.Fatalf("metrics %d %q", rec.Code, body)
 	}
 }

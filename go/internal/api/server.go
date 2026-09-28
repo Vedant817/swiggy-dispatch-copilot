@@ -36,6 +36,7 @@ func New(cfg config.Config, st *store.Store, rdb *redisx.Client) *Server {
 func (s *Server) routes() {
 	s.Mux.HandleFunc("/healthz", s.handleLiveness)
 	s.Mux.HandleFunc("/readyz", s.handleReadiness)
+	s.Mux.HandleFunc("/metrics", s.handleMetrics)
 	s.Mux.HandleFunc("/v1/", s.dispatchV1)
 	s.Mux.HandleFunc("/admin/", s.dispatchAdmin)
 }

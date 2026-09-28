@@ -59,6 +59,35 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	for name, val := range s.Counters.Snapshot() {
+		_, _ = w.Write([]byte("dispatch_" + name + " " + itoa(val) + "\n"))
+	}
+}
+
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
+}
+
 func (s *Server) handleOrderTrace(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	o, err := s.Store.GetOrder(r.Context(), id)
 	if err != nil {
