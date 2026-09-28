@@ -73,7 +73,6 @@ func seedOrder(t *testing.T, srv *api.Server, st *store.Store, riders int) strin
 func TestParallelAssignSameOrder(t *testing.T) {
 	srv, st := testSetup(t)
 	ctx := context.Background()
-	_ = st
 	orderID := seedOrder(t, srv, st, 5)
 	var wg sync.WaitGroup
 	errs := make([]error, 20)
@@ -93,31 +92,78 @@ func TestParallelAssignSameOrder(t *testing.T) {
 			t.Fatalf("assign error: %v", e)
 		}
 	}
-	n, _ := st.CountActiveAssignments(ctx, mustParse(orderID))
+	n, err := st.CountActiveAssignments(ctx, mustParse(orderID))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if n != 1 {
 		t.Fatalf("active assignments = %d, want 1", n)
 	}
 }
 
-func TestParallelCancelAndAssign(t *testing.T) {
+func TestParallelAssignAndExpiry(t *testing.T) {
 	srv, st := testSetup(t)
 	ctx := context.Background()
 	orderID := seedOrder(t, srv, st, 5)
+	var wg sync.WaitGroup
+	errs := make([]error, 20)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if _, err := srv.Assign.TryAssign(ctx, mustParse(orderID)); err != nil && !isBenignAssignErr(err) {
+				errs[idx] = err
+			}
+		}(i * 2)
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if _, err := srv.Assign.ExpireDue(ctx, 10); err != nil {
+				errs[idx] = err
+			}
+		}(i*2 + 1)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			t.Fatalf("race error: %v", e)
+		}
+	}
+	n, err := st.CountActiveAssignments(ctx, mustParse(orderID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n > 1 {
+		t.Fatalf("active = %d, want <=1", n)
+	}
+}
+
+func TestParallelAcceptAndReject(t *testing.T) {
+	srv, st := testSetup(t)
+	ctx := context.Background()
+	orderID := seedOrder(t, srv, st, 3)
+	a, err := srv.Assign.TryAssign(ctx, mustParse(orderID))
+	if err != nil {
+		t.Fatalf("seed assign: %v", err)
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = srv.Assign.TryAssign(ctx, mustParse(orderID))
+			_, _ = srv.Assign.Accept(ctx, a.ID)
 		}()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = srv.Assign.ExpireDue(ctx, 10)
+			_ = srv.Assign.Reject(ctx, a.ID)
 		}()
 	}
 	wg.Wait()
-	n, _ := st.CountActiveAssignments(ctx, mustParse(orderID))
+	n, err := st.CountActiveAssignments(ctx, mustParse(orderID))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if n > 1 {
 		t.Fatalf("active = %d, want <=1", n)
 	}
@@ -126,27 +172,53 @@ func TestParallelCancelAndAssign(t *testing.T) {
 func TestCapacityExhaustion(t *testing.T) {
 	srv, st := testSetup(t)
 	ctx := context.Background()
-	rest, _ := st.CreateRestaurant(ctx, "cap-kitchen", 12.95, 77.6, 12, 10)
-	rd, _ := st.CreateRider(ctx, 12.95, 77.6, 5.0)
+	rest, err := st.CreateRestaurant(ctx, "cap-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, err := st.CreateRider(ctx, 12.95, 77.6, 5.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rd.Capacity != 1 {
+		t.Fatalf("capacity = %d, want 1", rd.Capacity)
+	}
 	var orderIDs []string
 	for i := 0; i < 3; i++ {
-		o, _ := st.CreateOrder(ctx, rest.ID, "normal", time.Now().Add(30*time.Minute), nil)
-		_, _ = st.SetOrderStatus(ctx, nil, o.ID, []string{"created"}, "preparing")
-		_, _ = st.SetOrderStatus(ctx, nil, o.ID, []string{"preparing"}, "ready_for_assign")
+		o, err := st.CreateOrder(ctx, rest.ID, "normal", time.Now().Add(30*time.Minute), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.SetOrderStatus(ctx, nil, o.ID, []string{"created"}, "preparing"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.SetOrderStatus(ctx, nil, o.ID, []string{"preparing"}, "ready_for_assign"); err != nil {
+			t.Fatal(err)
+		}
 		orderIDs = append(orderIDs, o.ID.String())
 	}
 	var wg sync.WaitGroup
-	for _, oid := range orderIDs {
+	errs := make([]error, len(orderIDs))
+	for i, oid := range orderIDs {
 		wg.Add(1)
-		go func(id string) {
+		go func(idx int, id string) {
 			defer wg.Done()
-			_, _ = srv.Assign.TryAssign(ctx, mustParse(id))
-		}(oid)
+			if _, err := srv.Assign.TryAssign(ctx, mustParse(id)); err != nil && !isBenignAssignErr(err) {
+				errs[idx] = err
+			}
+		}(i, oid)
 	}
 	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			t.Fatalf("assign error: %v", e)
+		}
+	}
 	// Rider capacity 1: count active for the single rider across all orders <=1.
 	var n int
-	_ = st.Pool.QueryRow(ctx, `SELECT count(*) FROM assignments WHERE rider_id=$1 AND status IN ('offered','accepted')`, rd.ID).Scan(&n)
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM assignments WHERE rider_id=$1 AND status IN ('offered','accepted')`, rd.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n > 1 {
 		t.Fatalf("rider oversubscribed: %d", n)
 	}

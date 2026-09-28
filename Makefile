@@ -35,8 +35,10 @@ test:
 	cd $(GO_DIR) && go test -p 1 ./...
 
 race:
-	cd $(GO_DIR) && go test -race -p 1 ./internal/domain ./internal/config ./internal/gen ./internal/store && go test -p 1 ./tests/race ./tests/integration
-# Note: -race needs a Linux C toolchain; on Windows run race via docker (see README).
+	cd $(GO_DIR) && go test -race -p 1 ./...
+
+race-docker:
+	docker run --rm -v "$(CURDIR):/repo" -w /repo/go --add-host=host.docker.internal:host-gateway -e DATABASE_URL="postgres://dispatch:dispatch@host.docker.internal:5432/dispatch?sslmode=disable" -e TEST_DATABASE_URL="postgres://dispatch:dispatch@host.docker.internal:5432/dispatch?sslmode=disable" -e REDIS_ADDR="host.docker.internal:6379" golang:1.25 go test -race -p 1 ./...
 
 gen-world:
 	cd $(GO_DIR) && go run ./cmd/gen world --config ../$(CONFIG)
