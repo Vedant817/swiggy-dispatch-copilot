@@ -1,0 +1,45 @@
+server:
+  addr: ":8080"
+  shutdown_timeout: 10s
+
+postgres:
+  dsn_env: DATABASE_URL
+
+redis:
+  addr_env: REDIS_ADDR
+
+assign:
+  worker_count: 8
+  offer_ttl: 15s
+  max_candidates: 20
+  lock_ttl: 5s
+  reoffer_backoff: 1s
+
+scoring:
+  weights:
+    distance_km: -1.0
+    rider_load: -0.5
+    rating: 0.2
+    vip_bonus: 0.8
+
+generator:
+  seed: 42
+  city_bbox: [12.90, 77.50, 13.00, 77.70]
+  restaurants: 40
+  riders: 120
+  order_rate_per_min: 30
+  vip_ratio: 0.08
+  location_tick_ms: 2000
+
+agent:
+  base_url: "http://127.0.0.1:8080"
+  model_env: OPENAI_API_KEY
+  max_tool_calls: 12
+
+proposals:
+  ttl: 10m
+
+evals:
+  seed: 99
+  scenario_count: 24
+  min_pass_rate: 0.85

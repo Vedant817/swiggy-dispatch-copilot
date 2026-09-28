@@ -1,0 +1,19 @@
+[project]
+name = "dispatch-agent"
+version = "0.1.0"
+description = "Planner agent for dispatch copilot"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx==0.28.1",
+  "pydantic==2.11.7",
+  "pyyaml==6.0.2",
+  "langgraph==0.6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

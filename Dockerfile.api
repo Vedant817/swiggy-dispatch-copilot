@@ -1,0 +1,15 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go/go.mod go/go.sum ./go/
+WORKDIR /src/go
+RUN go mod download
+COPY go/ ./
+COPY configs/ ../configs/
+RUN CGO_ENABLED=0 go build -o /bin/api ./cmd/api
+
+FROM alpine:3.20
+WORKDIR /app
+COPY --from=build /bin/api /app/api
+COPY configs/ /app/configs/
+EXPOSE 8080
+CMD ["/app/api"]

@@ -1,0 +1,10 @@
+seed: 99
+scenario_count: 24
+min_pass_rate: 0.85
+base_url: "http://127.0.0.1:8080"
+world:
+  restaurants: 10
+  riders: 25
+timeout_seconds: 30
+output_dir: "evals/suites"
+report_dir: "evals/reports"

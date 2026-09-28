@@ -1,2 +1,30 @@
 # Local implementation checklist and research notes
 /TODO.md
+
+# Go
+/bin/
+/go/bin/
+*.exe
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+.agent-venv/
+
+# Env
+.env
+
+# Eval generated output
+/evals/suites/*.json
+!/evals/suites/.gitkeep
+/evals/reports/*.json
+!/evals/reports/.gitkeep
+/evals/reports/*.md
+
+# Load artifacts
+/load/report.json
+
+# OS
+.DS_Store
+Thumbs.db
