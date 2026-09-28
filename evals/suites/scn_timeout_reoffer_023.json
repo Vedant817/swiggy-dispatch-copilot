@@ -1,0 +1,34 @@
+{
+  "agent_goal": "Offer converts to assignment without double-assign.",
+  "assert": {
+    "no_double_assign": true,
+    "order_eventually": "assigned",
+    "proposal_committed": false,
+    "tools_used_subset": [
+      "get_order_trace"
+    ]
+  },
+  "id": "scn_timeout_reoffer_023",
+  "seed": 9900022,
+  "setup": {
+    "script": [
+      {
+        "action": "create_order",
+        "priority": "normal"
+      },
+      {
+        "action": "mark_ready"
+      },
+      {
+        "action": "assign"
+      },
+      {
+        "action": "accept"
+      }
+    ],
+    "world": {
+      "restaurants": 10,
+      "riders": 25
+    }
+  }
+}

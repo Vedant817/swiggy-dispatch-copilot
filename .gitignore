@@ -15,9 +15,9 @@ __pycache__/
 # Env
 .env
 
-# Eval generated output
-/evals/suites/*.json
-!/evals/suites/.gitkeep
+# Frozen eval suite is tracked (deterministic from configs/eval.yaml seed).
+# Regenerate with: python evals/generate_suite.py --config configs/eval.yaml
+# Eval reports stay local.
 /evals/reports/*.json
 !/evals/reports/.gitkeep
 /evals/reports/*.md

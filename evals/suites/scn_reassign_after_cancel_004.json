@@ -1,0 +1,43 @@
+{
+  "agent_goal": "Propose a valid reassignment after rider cancel.",
+  "assert": {
+    "no_double_assign": true,
+    "order_eventually": "assigned",
+    "proposal_committed": true,
+    "tools_used_subset": [
+      "get_order_trace",
+      "propose_reassign",
+      "commit_proposal"
+    ]
+  },
+  "id": "scn_reassign_after_cancel_004",
+  "seed": 9900003,
+  "setup": {
+    "script": [
+      {
+        "action": "create_order",
+        "priority": "normal"
+      },
+      {
+        "action": "mark_ready"
+      },
+      {
+        "action": "assign"
+      },
+      {
+        "action": "webhook_rider_cancel",
+        "when": "after_offer"
+      },
+      {
+        "action": "propose_reassign"
+      },
+      {
+        "action": "commit_proposal"
+      }
+    ],
+    "world": {
+      "restaurants": 10,
+      "riders": 25
+    }
+  }
+}
