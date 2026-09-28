@@ -25,3 +25,15 @@ func (s *Store) AbortIdempotency(ctx context.Context, key, method, tmpl, target 
 		key, method, tmpl, target)
 	return err
 }
+
+// CleanupStaleIdempotency removes in-progress (-1) claims older than maxAge,
+// healing crash windows between ClaimIdempotency and Complete/Abort.
+// Returns rows deleted.
+func (s *Store) CleanupStaleIdempotency(ctx context.Context, maxAge string) (int, error) {
+	tag, err := s.Pool.Exec(ctx,
+		`DELETE FROM idempotency_keys WHERE status=-1 AND created_at < now() - ($1::interval)`, maxAge)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}

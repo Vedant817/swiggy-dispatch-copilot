@@ -73,9 +73,10 @@ func (s *Service) Start(ctx context.Context) {
 				obs.Log("expire_failed", map[string]any{"error": eerr.Error()})
 			}
 			pexp, _ := s.Store.ExpireProposals(cctx, 100)
+			stale, _ := s.Store.CleanupStaleIdempotency(cctx, "5 minutes")
 			reoffered := s.ReofferReady(cctx, s.Cfg.Assign.WorkerCount*2)
-			if expired > 0 || reoffered > 0 || pexp > 0 {
-				obs.Log("worker_tick", map[string]any{"expired": expired, "reoffered": reoffered, "proposals_expired": pexp})
+			if expired > 0 || reoffered > 0 || pexp > 0 || stale > 0 {
+				obs.Log("worker_tick", map[string]any{"expired": expired, "reoffered": reoffered, "proposals_expired": pexp, "stale_idem": stale})
 			}
 			cancel()
 		}
