@@ -168,11 +168,11 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 	breakRaw, _ := json.Marshal(best.score)
 	var a store.Assignment
 	var breakdown []byte
-	exp := time.Now().Add(s.Cfg.Assign.OfferTTL)
+	ttlSecs := s.Cfg.Assign.OfferTTL.Seconds()
 	err = tx.QueryRow(ctx,
-		`INSERT INTO assignments(order_id,rider_id,expires_at,score,score_breakdown) VALUES($1,$2,$3,$4,$5)
+		`INSERT INTO assignments(order_id,rider_id,expires_at,score,score_breakdown) VALUES($1,$2,now() + ($3 * interval '1 second'),$4,$5)
 		 RETURNING id,order_id,rider_id,status,offered_at,expires_at,accepted_at,score,score_breakdown,created_at`,
-		orderID, best.id, exp, best.score.Score, breakRaw).Scan(
+		orderID, best.id, ttlSecs, best.score.Score, breakRaw).Scan(
 		&a.ID, &a.OrderID, &a.RiderID, &a.Status, &a.OfferedAt, &a.ExpiresAt, &a.AcceptedAt, &a.Score, &breakdown, &a.CreatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -287,18 +287,33 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.Store.Pool.Query(ctx,
+	// Selection in explicit tx so SKIP LOCKED actually skips rows locked by peers.
+	selTx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := selTx.Query(ctx,
 		`SELECT id FROM assignments WHERE status=$1 AND expires_at < now() ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED`, domain.AssignOffered, limit)
 	if err != nil {
+		_ = selTx.Rollback(ctx)
 		return 0, err
 	}
 	var ids []uuid.UUID
 	for rows.Next() {
 		var id uuid.UUID
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		_ = selTx.Rollback(ctx)
+		return 0, err
+	}
+	if err := selTx.Commit(ctx); err != nil {
+		return 0, err
+	}
 	n := 0
 	for _, id := range ids {
 		tx, err := s.Store.Pool.Begin(ctx)
@@ -315,7 +330,11 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 			_ = tx.Rollback(ctx)
 			continue
 		}
-		_, _ = tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2`, domain.AssignExpired, id)
+		tag, err := tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2 AND status=$3`, domain.AssignExpired, id, domain.AssignOffered)
+		if err != nil || tag.RowsAffected() == 0 {
+			_ = tx.Rollback(ctx)
+			continue
+		}
 		_, _ = tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.RiderAvailable, riderID, domain.RiderOffered)
 		_, _ = tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.OrderReady, orderID, domain.OrderOffering)
 		_ = s.Store.AppendEvent(ctx, tx, orderID, &id, &riderID, "offer_expired", nil)

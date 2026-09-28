@@ -17,22 +17,38 @@ func (s *Service) ReofferReady(ctx context.Context, limit int) int {
 	rows, err := s.Store.Pool.Query(ctx,
 		`SELECT id FROM orders WHERE status=$1 ORDER BY updated_at ASC LIMIT $2`, domain.OrderReady, limit)
 	if err != nil {
+		obs.Log("reoffer_query_failed", map[string]any{"error": err.Error()})
 		return 0
 	}
 	var ids []uuid.UUID
 	for rows.Next() {
 		var id uuid.UUID
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		obs.Log("reoffer_scan_failed", map[string]any{"error": err.Error()})
+	}
 	n := 0
 	for _, id := range ids {
-		if _, found, _ := s.Store.ActiveAssignmentForOrder(ctx, nil, id); found {
+		_, found, aerr := s.Store.ActiveAssignmentForOrder(ctx, nil, id)
+		if aerr != nil {
+			obs.Log("reoffer_check_failed", map[string]any{"order_id": id.String(), "error": aerr.Error()})
+			continue
+		}
+		if found {
 			continue
 		}
 		if _, err := s.TryAssign(ctx, id); err == nil {
 			n++
+		} else if err.Error() == "NO_RIDERS_AVAILABLE" {
+			s.Counters.Inc("reoffer_no_riders")
+			break
+		} else {
+			obs.Log("reoffer_failed", map[string]any{"order_id": id.String(), "error": err.Error()})
 		}
 	}
 	return n
@@ -52,7 +68,10 @@ func (s *Service) Start(ctx context.Context) {
 			return
 		case <-t.C:
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			expired, _ := s.ExpireDue(cctx, 100)
+			expired, eerr := s.ExpireDue(cctx, 100)
+			if eerr != nil {
+				obs.Log("expire_failed", map[string]any{"error": eerr.Error()})
+			}
 			reoffered := s.ReofferReady(cctx, s.Cfg.Assign.WorkerCount*2)
 			if expired > 0 || reoffered > 0 {
 				obs.Log("worker_tick", map[string]any{"expired": expired, "reoffered": reoffered})

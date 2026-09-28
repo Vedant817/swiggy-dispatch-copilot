@@ -15,15 +15,20 @@ import (
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/store"
 )
 
-func main() {
-	cfgPath := os.Getenv("CONFIG_PATH")
-	if cfgPath == "" {
-		cfgPath = config.DefaultPath()
-		// allow running from go/ dir
-		if _, err := os.Stat(cfgPath); err != nil {
-			cfgPath = "../configs/default.yaml"
+func resolveConfig() string {
+	if v := os.Getenv("CONFIG_PATH"); v != "" {
+		return v
+	}
+	for _, p := range []string{"./configs/default.yaml", "../configs/default.yaml", "../../configs/default.yaml", config.DefaultPath()} {
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
+	return config.DefaultPath()
+}
+
+func main() {
+	cfgPath := resolveConfig()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -58,6 +63,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	workerStop()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
