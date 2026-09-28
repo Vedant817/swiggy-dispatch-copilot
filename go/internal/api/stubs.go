@@ -35,7 +35,3 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOrderTrace(w http.ResponseWriter, r *http.Request, _ uuid.UUID) {
 	writeError(w, r, 501, "VALIDATION_ERROR", "trace wired in C1")
 }
-
-func (s *Server) dispatchAdmin(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, 501, "VALIDATION_ERROR", "admin wired in B3")
-}

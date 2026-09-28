@@ -10,8 +10,9 @@ import (
 )
 
 type createOrderReq struct {
-	RestaurantID *uuid.UUID `json:"restaurant_id"`
-	Priority     string     `json:"priority"`
+	RestaurantID      *uuid.UUID `json:"restaurant_id"`
+	RestaurantPicker  string     `json:"restaurant_picker"`
+	Priority          string     `json:"priority"`
 }
 
 func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +21,16 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "invalid JSON")
 		return
 	}
-	if req.RestaurantID == nil || *req.RestaurantID == uuid.Nil {
+	restaurantID := req.RestaurantID
+	if restaurantID == nil && req.RestaurantPicker != "" {
+		var picked uuid.UUID
+		if err := s.Store.Pool.QueryRow(r.Context(), `SELECT id FROM restaurants ORDER BY random() LIMIT 1`).Scan(&picked); err != nil {
+			writeError(w, r, 409, "VALIDATION_ERROR", "no restaurants seeded")
+			return
+		}
+		restaurantID = &picked
+	}
+	if restaurantID == nil || *restaurantID == uuid.Nil {
 		writeError(w, r, 400, "VALIDATION_ERROR", "restaurant_id required")
 		return
 	}
@@ -32,7 +42,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "priority must be normal|vip")
 		return
 	}
-	body := map[string]any{"restaurant_id": req.RestaurantID.String(), "priority": priority}
+	body := map[string]any{"restaurant_id": restaurantID.String(), "priority": priority}
 	owned, hash := s.beginIdem(w, r, "POST /v1/orders", "", body)
 	if !owned {
 		return
@@ -41,7 +51,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	if k := r.Header.Get("Idempotency-Key"); k != "" {
 		key = &k
 	}
-	o, err := s.Store.CreateOrder(r.Context(), *req.RestaurantID, priority, time.Now().Add(45*time.Minute), key)
+	o, err := s.Store.CreateOrder(r.Context(), *restaurantID, priority, time.Now().Add(45*time.Minute), key)
 	if err != nil {
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "create order failed")

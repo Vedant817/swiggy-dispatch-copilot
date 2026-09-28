@@ -133,6 +133,10 @@ func (s *Server) dispatchV1(w http.ResponseWriter, r *http.Request) {
 		s.handleListRiders(w, r)
 		return
 	}
+	if p == "/restaurants" && r.Method == http.MethodGet {
+		s.handleListRestaurants(w, r)
+		return
+	}
 	if strings.HasPrefix(p, "/riders/") && strings.HasSuffix(p, "/location") && r.Method == http.MethodPost {
 		trim := strings.TrimPrefix(p, "/riders/")
 		idStr := strings.TrimSuffix(trim, "/location")
