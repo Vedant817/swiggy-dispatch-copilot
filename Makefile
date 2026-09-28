@@ -65,3 +65,6 @@ load-go:
 
 demo:
 	bash scripts/demo.sh
+
+demo-ps:
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/demo.ps1
