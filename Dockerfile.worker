@@ -1,6 +1,6 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go/go.mod go/go.sum ./go/
+COPY go/go.mod ./go/
 WORKDIR /src/go
 RUN go mod download
 COPY go/ ./
