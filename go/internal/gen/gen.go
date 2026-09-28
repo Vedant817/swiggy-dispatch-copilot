@@ -28,6 +28,9 @@ var nameAdjectives = []string{"Spicy", "Tandoori", "Cloud", "Midnight", "Green",
 var nameNouns = []string{"Kitchen", "Bowl", "Byte", "Pot", "Thali", "Wok", "Oven", "Dhaba"}
 
 func GenerateWorld(seed int64, bbox []float64, nRest, nRiders int) WorldSpec {
+	if len(bbox) != 4 {
+		bbox = []float64{12.9, 77.5, 13.0, 77.7}
+	}
 	rng := rand.New(rand.NewSource(seed))
 	minLat, minLng, maxLat, maxLng := bbox[0], bbox[1], bbox[2], bbox[3]
 	ws := WorldSpec{Seed: seed}
@@ -51,13 +54,20 @@ func GenerateWorld(seed int64, bbox []float64, nRest, nRiders int) WorldSpec {
 }
 
 // PickRestaurant selects via picker: random|hotspot|nearest_to_rider.
+// hotspot picks the highest-capacity restaurant (deterministic); unknown pickers return -1.
 func PickRestaurant(ws WorldSpec, picker string, riderLat, riderLng float64, rng *rand.Rand) int {
 	if len(ws.Restaurants) == 0 {
 		return -1
 	}
 	switch picker {
 	case "hotspot":
-		return 0
+		best, bestCap := 0, -1
+		for i, r := range ws.Restaurants {
+			if r.Capacity > bestCap {
+				bestCap, best = r.Capacity, i
+			}
+		}
+		return best
 	case "nearest_to_rider":
 		best, bestD := 0, 1e18
 		for i, r := range ws.Restaurants {
@@ -67,8 +77,13 @@ func PickRestaurant(ws WorldSpec, picker string, riderLat, riderLng float64, rng
 			}
 		}
 		return best
-	default:
+	case "random":
+		if rng == nil {
+			return -1
+		}
 		return rng.Intn(len(ws.Restaurants))
+	default:
+		return -1
 	}
 }
 

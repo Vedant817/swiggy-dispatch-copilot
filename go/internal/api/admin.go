@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/gen"
+	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/obs"
 )
 
 type seedWorldReq struct {
@@ -14,7 +15,7 @@ type seedWorldReq struct {
 }
 
 func (s *Server) dispatchAdmin(w http.ResponseWriter, r *http.Request) {
-	if s.Cfg.AppEnv() == "prod" {
+	if strings.ToLower(s.Cfg.AppEnv()) == "prod" {
 		writeError(w, r, 403, "FORBIDDEN", "admin disabled in prod")
 		return
 	}
@@ -65,7 +66,8 @@ func (s *Server) handleSeedWorld(w http.ResponseWriter, r *http.Request) {
 	createdRest := 0
 	for _, rs := range spec.Restaurants {
 		if _, err := s.Store.CreateRestaurant(r.Context(), rs.Name, rs.Lat, rs.Lng, rs.PrepMinutesP50, rs.Capacity); err != nil {
-			writeError(w, r, 500, "INTERNAL", "seed restaurant failed: "+err.Error())
+			obs.Log("seed_failed", map[string]any{"error": err.Error()})
+			writeError(w, r, 500, "INTERNAL", "seed restaurant failed")
 			return
 		}
 		createdRest++
@@ -80,5 +82,3 @@ func (s *Server) handleSeedWorld(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 201, map[string]any{"seed": seed, "restaurants": createdRest, "riders": createdRiders})
 }
-
-var _ = strings.HasPrefix

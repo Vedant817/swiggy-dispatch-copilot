@@ -21,17 +21,8 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "invalid JSON")
 		return
 	}
-	restaurantID := req.RestaurantID
-	if restaurantID == nil && req.RestaurantPicker != "" {
-		var picked uuid.UUID
-		if err := s.Store.Pool.QueryRow(r.Context(), `SELECT id FROM restaurants ORDER BY random() LIMIT 1`).Scan(&picked); err != nil {
-			writeError(w, r, 409, "VALIDATION_ERROR", "no restaurants seeded")
-			return
-		}
-		restaurantID = &picked
-	}
-	if restaurantID == nil || *restaurantID == uuid.Nil {
-		writeError(w, r, 400, "VALIDATION_ERROR", "restaurant_id required")
+	if req.RestaurantID != nil && req.RestaurantPicker != "" {
+		writeError(w, r, 400, "VALIDATION_ERROR", "provide either restaurant_id or restaurant_picker")
 		return
 	}
 	priority := req.Priority
@@ -42,10 +33,38 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "priority must be normal|vip")
 		return
 	}
-	body := map[string]any{"restaurant_id": restaurantID.String(), "priority": priority}
+	// Idempotency hashes the original request, so picker retries replay correctly.
+	var body map[string]any
+	if req.RestaurantID != nil {
+		body = map[string]any{"restaurant_id": req.RestaurantID.String(), "priority": priority}
+	} else if req.RestaurantPicker != "" {
+		if req.RestaurantPicker != "random" && req.RestaurantPicker != "hotspot" {
+			writeError(w, r, 400, "VALIDATION_ERROR", "restaurant_picker must be random|hotspot")
+			return
+		}
+		body = map[string]any{"restaurant_picker": req.RestaurantPicker, "priority": priority}
+	} else {
+		writeError(w, r, 400, "VALIDATION_ERROR", "restaurant_id required")
+		return
+	}
 	owned, hash := s.beginIdem(w, r, "POST /v1/orders", "", body)
 	if !owned {
 		return
+	}
+	restaurantID := req.RestaurantID
+	if restaurantID == nil {
+		var picked uuid.UUID
+		var q string
+		if req.RestaurantPicker == "hotspot" {
+			q = `SELECT id FROM restaurants ORDER BY capacity DESC LIMIT 1`
+		} else {
+			q = `SELECT id FROM restaurants ORDER BY random() LIMIT 1`
+		}
+		if err := s.Store.Pool.QueryRow(r.Context(), q).Scan(&picked); err != nil {
+			writeError(w, r, 409, "VALIDATION_ERROR", "no restaurants seeded")
+			return
+		}
+		restaurantID = &picked
 	}
 	var key *string
 	if k := r.Header.Get("Idempotency-Key"); k != "" {

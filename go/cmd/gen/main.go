@@ -68,7 +68,11 @@ func main() {
 		}
 		fmt.Println("world seeded")
 	case "traffic":
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		trafficSeed := seed
+		if trafficSeed == 0 {
+			trafficSeed = time.Now().UnixNano()
+		}
+		rng := rand.New(rand.NewSource(trafficSeed))
 		rate := cfg.Generator.OrderRatePerMin
 		if rate <= 0 {
 			rate = 30
@@ -89,6 +93,12 @@ func main() {
 		}
 		fmt.Println("traffic done")
 	case "burst":
+		if concurrency <= 0 {
+			concurrency = 1
+		}
+		if count < 0 {
+			count = 0
+		}
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, concurrency)
 		for i := 0; i < count; i++ {
@@ -149,6 +159,7 @@ func postOrder(client *http.Client, base, priority string) error {
 	// drive lifecycle: prepare -> ready -> assign (best effort)
 	for _, step := range []string{"prepare", "ready"} {
 		r, _ := http.NewRequest("POST", base+"/v1/orders/"+out.Order.ID+"/"+step, nil)
+		r.Header.Set("Idempotency-Key", fmt.Sprintf("%s-%s", step, out.Order.ID))
 		if resp2, err := client.Do(r); err == nil {
 			io.Copy(io.Discard, resp2.Body)
 			resp2.Body.Close()
@@ -180,6 +191,9 @@ func moveRandomRider(client *http.Client, base string, cfg config.Config, rng *r
 	}
 	rd := out.Riders[rng.Intn(len(out.Riders))]
 	bbox := cfg.Generator.CityBBox
+	if len(bbox) != 4 {
+		return
+	}
 	lat := bbox[0] + rng.Float64()*(bbox[2]-bbox[0])
 	lng := bbox[1] + rng.Float64()*(bbox[3]-bbox[1])
 	b, _ := json.Marshal(map[string]any{"lat": lat, "lng": lng})

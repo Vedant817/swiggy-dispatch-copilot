@@ -86,6 +86,7 @@ func decodeJSON(r *http.Request, v any) error {
 	return json.Unmarshal(b, v)
 }
 
+// Empty tokens mean open local mode (dev/test). Set ADMIN_TOKEN/OPS_TOKEN to enforce.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	want := s.Cfg.AdminToken()
 	if want == "" {

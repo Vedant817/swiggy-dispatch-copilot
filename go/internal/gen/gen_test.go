@@ -21,7 +21,21 @@ func TestDeterministic(t *testing.T) {
 		t.Fatal("different seeds should differ")
 	}
 	rng := rand.New(rand.NewSource(1))
-	if PickRestaurant(a, "hotspot", 0, 0, rng) != 0 {
-		t.Fatal("hotspot should pick 0")
+	hot := PickRestaurant(a, "hotspot", 0, 0, rng)
+	if hot < 0 || hot >= len(a.Restaurants) {
+		t.Fatal("hotspot out of range")
+	}
+	best := hot
+	for i, r := range a.Restaurants {
+		if r.Capacity > a.Restaurants[best].Capacity {
+			t.Fatalf("hotspot should pick max capacity")
+		}
+		_ = i
+	}
+	if PickRestaurant(a, "bogus", 0, 0, rng) != -1 {
+		t.Fatal("unknown picker should return -1")
+	}
+	if PickRestaurant(a, "random", 0, 0, nil) != -1 {
+		t.Fatal("nil rng should return -1")
 	}
 }
