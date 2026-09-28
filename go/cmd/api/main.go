@@ -45,6 +45,9 @@ func main() {
 	defer rdb.Close()
 
 	srv := api.New(cfg, st, rdb)
+	workerCtx, workerStop := context.WithCancel(context.Background())
+	defer workerStop()
+	go srv.Assign.Start(workerCtx)
 	httpSrv := &http.Server{Addr: cfg.Server.Addr, Handler: srv}
 	go func() {
 		log.Printf("api listening on %s", cfg.Server.Addr)

@@ -6,9 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/assign"
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/config"
+	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/obs"
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/redisx"
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/store"
 )
@@ -36,9 +37,9 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 	defer rdb.Close()
-	log.Printf("worker running (expiry poller wired in B4), offer_ttl=%v", cfg.Assign.OfferTTL)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	time.Sleep(100 * time.Millisecond)
+	svc := assign.New(cfg, st, rdb, obs.NewCounters())
+	log.Printf("worker running, offer_ttl=%v workers=%d", cfg.Assign.OfferTTL, cfg.Assign.WorkerCount)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	svc.Start(ctx)
 }
