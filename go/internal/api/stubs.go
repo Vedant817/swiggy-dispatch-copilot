@@ -8,10 +8,6 @@ import (
 
 // Stubs wired fully in phases B3/C. They keep B2 compiling.
 
-func (s *Server) handleRiderWebhook(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, 501, "VALIDATION_ERROR", "webhook wired in B5")
-}
-
 func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, 501, "VALIDATION_ERROR", "proposals wired in C2")
 }
