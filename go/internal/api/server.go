@@ -86,13 +86,14 @@ func (s *Server) dispatchV1(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, 405, "VALIDATION_ERROR", "method not allowed")
 			return
 		}
+		if len(parts) == 2 && parts[1] == "trace" && r.Method == http.MethodGet {
+			s.handleOrderTrace(w, r, id)
+			return
+		}
 		if len(parts) == 2 && r.Method == http.MethodPost {
 			switch parts[1] {
 			case "assign":
 				s.handleEnqueueAssign(w, r, id)
-				return
-			case "trace":
-				s.handleOrderTrace(w, r, id)
 				return
 			default:
 				if t, ok := orderTargets()[parts[1]]; ok {

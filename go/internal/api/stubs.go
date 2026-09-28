@@ -23,11 +23,3 @@ func (s *Server) handleCommitProposal(w http.ResponseWriter, r *http.Request, _ 
 func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request, _ uuid.UUID) {
 	writeError(w, r, 501, "VALIDATION_ERROR", "proposals wired in C2")
 }
-
-func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, 501, "VALIDATION_ERROR", "snapshot wired in C1")
-}
-
-func (s *Server) handleOrderTrace(w http.ResponseWriter, r *http.Request, _ uuid.UUID) {
-	writeError(w, r, 501, "VALIDATION_ERROR", "trace wired in C1")
-}
