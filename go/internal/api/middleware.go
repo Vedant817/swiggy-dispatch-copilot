@@ -41,6 +41,14 @@ func (s *Server) endIdem(r *http.Request, tmpl, target, hash string, status int,
 	_ = s.Store.CompleteIdempotency(r.Context(), key, r.Method, tmpl, target, status, body)
 }
 
+func (s *Server) abortIdem(r *http.Request, tmpl, target string) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		return
+	}
+	_ = s.Store.AbortIdempotency(r.Context(), key, r.Method, tmpl, target)
+}
+
 // checkIdem kept for read-only callers that only need replay without claiming.
 func (s *Server) checkIdem(w http.ResponseWriter, r *http.Request, tmpl, target string, body any) (bool, string) {
 	key := r.Header.Get("Idempotency-Key")

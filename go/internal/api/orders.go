@@ -61,6 +61,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 			q = `SELECT id FROM restaurants ORDER BY random() LIMIT 1`
 		}
 		if err := s.Store.Pool.QueryRow(r.Context(), q).Scan(&picked); err != nil {
+			s.abortIdem(r, "POST /v1/orders", "")
 			writeError(w, r, 409, "VALIDATION_ERROR", "no restaurants seeded")
 			return
 		}
@@ -72,6 +73,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	o, err := s.Store.CreateOrder(r.Context(), *restaurantID, priority, time.Now().Add(45*time.Minute), key)
 	if err != nil {
+		s.abortIdem(r, "POST /v1/orders", "")
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "create order failed")
 		}
@@ -91,6 +93,7 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request, id uuid.
 		}
 		return
 	}
+	o.IdempotencyKey = nil
 	active, found, _ := s.Store.ActiveAssignmentForOrder(r.Context(), nil, id)
 	resp := map[string]any{"order": o}
 	if found {
@@ -110,6 +113,7 @@ func (s *Server) handleOrderTransition(w http.ResponseWriter, r *http.Request, i
 	}
 	o, err := s.Store.SetOrderStatus(r.Context(), nil, id, okFrom, to)
 	if err != nil {
+		s.abortIdem(r, tmpl, id.String())
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "transition failed")
 		}

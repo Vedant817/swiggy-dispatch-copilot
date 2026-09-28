@@ -14,6 +14,7 @@ func (s *Server) handleEnqueueAssign(w http.ResponseWriter, r *http.Request, ord
 	}
 	a, err := s.Assign.TryAssign(r.Context(), orderID)
 	if err != nil {
+		s.abortIdem(r, "POST /v1/orders/{id}/assign", orderID.String())
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "assign failed")
 		}
@@ -43,6 +44,7 @@ func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, id uuid.UU
 	}
 	a, err := s.Assign.Accept(r.Context(), id)
 	if err != nil {
+		s.abortIdem(r, "POST /v1/assignments/{id}/accept", id.String())
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "accept failed")
 		}
@@ -60,6 +62,7 @@ func (s *Server) handleReject(w http.ResponseWriter, r *http.Request, id uuid.UU
 		return
 	}
 	if err := s.Assign.Reject(r.Context(), id); err != nil {
+		s.abortIdem(r, "POST /v1/assignments/{id}/reject", id.String())
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "reject failed")
 		}

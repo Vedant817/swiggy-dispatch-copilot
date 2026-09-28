@@ -303,7 +303,7 @@ func (s *Store) AppendEvent(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, a
 
 func (s *Store) ListEvents(ctx context.Context, orderID uuid.UUID) ([]AssignmentEvent, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT id,order_id,assignment_id,rider_id,event,detail,created_at FROM assignment_events WHERE order_id=$1 ORDER BY created_at ASC`, orderID)
+		`SELECT id,order_id,assignment_id,rider_id,event,detail,created_at FROM assignment_events WHERE order_id=$1 ORDER BY created_at ASC, id ASC LIMIT 500`, orderID)
 	if err != nil {
 		return nil, err
 	}

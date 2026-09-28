@@ -36,6 +36,11 @@ func mapStoreError(w http.ResponseWriter, r *http.Request, err error) bool {
 		return true
 	}
 	msg := err.Error()
+	// Postgres deadlock (40P01) from concurrent commit/accept: retryable conflict.
+	if strings.Contains(msg, "40P01") || strings.Contains(strings.ToLower(msg), "deadlock") {
+		writeError(w, r, 409, "ASSIGNMENT_STATE_CONFLICT", "concurrent modification, retry")
+		return true
+	}
 	switch {
 	case strings.HasPrefix(msg, "ORDER_NOT_FOUND"):
 		writeError(w, r, 404, "ORDER_NOT_FOUND", msg)

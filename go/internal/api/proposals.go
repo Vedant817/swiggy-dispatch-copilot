@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -30,11 +31,7 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 	// Validate referenced IDs exist (no invented IDs).
 	if err := s.validateProposalPayload(r, req.Type, req.Payload); err != nil {
 		if ae, ok := err.(*apiErr); ok {
-			if ae.code == "NOT_FOUND" {
-				writeError(w, r, 404, ae.code, ae.msg)
-			} else {
-				writeError(w, r, 400, ae.code, ae.msg)
-			}
+			writeError(w, r, ae.httpCode(), ae.code, ae.msg)
 			return
 		}
 		if !mapStoreError(w, r, err) {
@@ -49,6 +46,7 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := s.Store.CreateProposal(r.Context(), req.Type, req.Payload, req.Reason, s.Cfg.Proposals.TTL)
 	if err != nil {
+		s.abortIdem(r, "POST /v1/proposals", "")
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "create proposal failed")
 		}
@@ -86,10 +84,10 @@ func (s *Server) validateProposalPayload(r *http.Request, typ string, payload ma
 		}
 		var exists bool
 		if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id=$1)`, *oid).Scan(&exists); err != nil || !exists {
-			return err404("ORDER_NOT_FOUND: proposal order unknown")
+			return errOrderNotFound("proposal order unknown")
 		}
 		if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM riders WHERE id=$1)`, *rid).Scan(&exists); err != nil || !exists {
-			return err404("RIDER_NOT_FOUND: proposal rider unknown")
+			return errRiderNotFound("proposal rider unknown")
 		}
 	case "batch_hint":
 		raw, ok := payload["order_ids"]
@@ -111,7 +109,7 @@ func (s *Server) validateProposalPayload(r *http.Request, typ string, payload ma
 			}
 			var exists bool
 			if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id=$1)`, id).Scan(&exists); err != nil || !exists {
-				return err404("ORDER_NOT_FOUND: batch order unknown")
+				return errOrderNotFound("batch order unknown")
 			}
 		}
 	case "delay_explain":
@@ -121,20 +119,29 @@ func (s *Server) validateProposalPayload(r *http.Request, typ string, payload ma
 		}
 		var exists bool
 		if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id=$1)`, *oid).Scan(&exists); err != nil || !exists {
-			return err404("ORDER_NOT_FOUND: proposal order unknown")
+			return errOrderNotFound("proposal order unknown")
 		}
 	}
 	return nil
 }
 
-func err400(m string) error { return &apiErr{code: "VALIDATION_ERROR", msg: m} }
-func err404(m string) error { return &apiErr{code: "NOT_FOUND", msg: m} }
+func err400(m string) error { return &apiErr{code: "VALIDATION_ERROR", msg: m, http: 400} }
+func errOrderNotFound(m string) error { return &apiErr{code: "ORDER_NOT_FOUND", msg: m, http: 404} }
+func errRiderNotFound(m string) error { return &apiErr{code: "RIDER_NOT_FOUND", msg: m, http: 404} }
+func err404(m string) error { return &apiErr{code: "NOT_FOUND", msg: m, http: 404} }
 
 type apiErr struct {
 	code, msg string
+	http      int
 }
 
 func (e *apiErr) Error() string { return e.code + ": " + e.msg }
+func (e *apiErr) httpCode() int {
+	if e.http != 0 {
+		return e.http
+	}
+	return 400
+}
 
 func (s *Server) handleGetProposal(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	p, err := s.Store.GetProposal(r.Context(), id)
@@ -159,13 +166,33 @@ func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request, id
 		Reason string `json:"reason"`
 	}
 	_ = decodeJSON(r, &req)
+	body := map[string]any{"action": "reject", "reason": req.Reason}
+	owned, hash := s.beginIdem(w, r, "POST /v1/proposals/{id}/reject", id.String(), body)
+	if !owned {
+		return
+	}
 	p, err := s.Store.SetProposalStatus(r.Context(), nil, id, []string{"pending"}, "rejected", req.Reason)
 	if err != nil {
+		s.abortIdem(r, "POST /v1/proposals/{id}/reject", id.String())
+		if err == pgx.ErrNoRows {
+			writeError(w, r, 404, "PROPOSAL_NOT_FOUND", "proposal not found")
+			return
+		}
+		if err == store.ErrNotFound {
+			writeError(w, r, 404, "PROPOSAL_NOT_FOUND", "proposal not found")
+			return
+		}
+		if err == store.ErrStateConflict {
+			writeError(w, r, 409, "PROPOSAL_STATE_CONFLICT", "cannot reject")
+			return
+		}
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 409, "PROPOSAL_STATE_CONFLICT", "cannot reject")
 		}
 		return
 	}
 	s.Counters.Inc("proposals_rejected")
-	writeJSON(w, 200, map[string]any{"proposal": p})
+	resp := map[string]any{"proposal": p}
+	s.endIdem(r, "POST /v1/proposals/{id}/reject", id.String(), hash, 200, resp)
+	writeJSON(w, 200, resp)
 }

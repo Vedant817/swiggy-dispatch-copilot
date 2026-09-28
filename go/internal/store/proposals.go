@@ -44,6 +44,12 @@ func (s *Store) GetProposal(ctx context.Context, id uuid.UUID) (Proposal, error)
 }
 
 func (s *Store) SetProposalStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID, from []string, to, reason string) (Proposal, error) {
+	// Expire first so stale pending cannot transition.
+	if tx != nil {
+		_, _ = tx.Exec(ctx, `UPDATE proposals SET status='expired',updated_at=now() WHERE id=$1 AND status='pending' AND expires_at <= now()`, id)
+	} else {
+		_, _ = s.Pool.Exec(ctx, `UPDATE proposals SET status='expired',updated_at=now() WHERE id=$1 AND status='pending' AND expires_at <= now()`, id)
+	}
 	var p Proposal
 	var raw []byte
 	q := `UPDATE proposals SET status=$2,reason=COALESCE(NULLIF($3,''),reason),updated_at=now()
