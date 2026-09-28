@@ -51,12 +51,18 @@ func TestMigrateAndConstraints(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO assignments(order_id,rider_id,expires_at) VALUES($1,$2,$3)`, o.ID, rd.ID, exp); err != nil {
 		t.Fatal(err)
 	}
-	rd2, _ := st.CreateRider(ctx, 12.96, 77.61, 4.9)
+	rd2, err := st.CreateRider(ctx, 12.96, 77.61, 4.9)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO assignments(order_id,rider_id,expires_at) VALUES($1,$2,$3)`, o.ID, rd2.ID, exp); err == nil {
 		t.Fatal("expected duplicate active assignment per order to fail")
 	}
 	// Same rider cannot hold two active offers.
-	o2, _ := st.CreateOrder(ctx, r.ID, "vip", time.Now().Add(30*time.Minute), nil)
+	o2, err := st.CreateOrder(ctx, r.ID, "vip", time.Now().Add(30*time.Minute), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO assignments(order_id,rider_id,expires_at) VALUES($1,$2,$3)`, o2.ID, rd.ID, exp); err == nil {
 		t.Fatal("expected duplicate active assignment per rider to fail")
 	}

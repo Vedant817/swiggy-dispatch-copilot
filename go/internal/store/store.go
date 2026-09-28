@@ -32,7 +32,8 @@ func (s *Store) Ping(ctx context.Context) error { return s.Pool.Ping(ctx) }
 
 func (s *Store) Close() { s.Pool.Close() }
 
-// Migrate applies embedded SQL files in lexical order inside a single transaction each.
+// Migrate applies embedded SQL files in lexical order. Files must be idempotent
+// (IF NOT EXISTS) because no version table is maintained yet.
 func (s *Store) Migrate(ctx context.Context) error {
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {

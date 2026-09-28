@@ -5,19 +5,36 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	ErrIdempotencyReused = errors.New("IDEMPOTENCY_KEY_REUSED")
+	ErrNotFound          = errors.New("NOT_FOUND")
+	ErrStateConflict     = errors.New("STATE_CONFLICT")
+)
+
 // --- helpers ---
 
-func payloadHash(v any) string {
-	b, _ := json.Marshal(v)
+func payloadHash(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
+}
+
+func mustHash(v any) string {
+	h, err := payloadHash(v)
+	if err != nil {
+		return "unhashable"
+	}
+	return h
 }
 
 // --- restaurants/riders ---
@@ -58,7 +75,7 @@ func (s *Store) ListRidersByStatus(ctx context.Context, status string, limit int
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Rider
+	out := []Rider{}
 	for rows.Next() {
 		var r Rider
 		if err := rows.Scan(&r.ID, &r.Status, &r.Lat, &r.Lng, &r.Capacity, &r.Rating, &r.CreatedAt, &r.UpdatedAt); err != nil {
@@ -97,8 +114,8 @@ func (s *Store) GetOrder(ctx context.Context, id uuid.UUID) (Order, error) {
 	return o, err
 }
 
-// TransitionOrder performs a checked status transition inside caller's transaction semantics.
-// Allowed map is enforced in domain package; store only executes conditional update.
+// SetOrderStatus performs a checked status transition.
+// Returns ErrNotFound when the order does not exist, ErrStateConflict on illegal transition.
 func (s *Store) SetOrderStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID, from []string, to string) (Order, error) {
 	var o Order
 	var db pgx.Row
@@ -110,7 +127,19 @@ func (s *Store) SetOrderStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID, fro
 		db = s.Pool.QueryRow(ctx, q, id, to, from)
 	}
 	err := db.Scan(&o.ID, &o.RestaurantID, &o.Status, &o.Priority, &o.SLADeliverBy, &o.IdempotencyKey, &o.CreatedAt, &o.UpdatedAt)
-	return o, err
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			var exists bool
+			check := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id=$1)`, id)
+			_ = check.Scan(&exists)
+			if !exists {
+				return o, ErrNotFound
+			}
+			return o, ErrStateConflict
+		}
+		return o, err
+	}
+	return o, nil
 }
 
 // --- assignments ---
@@ -159,7 +188,10 @@ type IdempotencyResult struct {
 }
 
 func (s *Store) CheckIdempotency(ctx context.Context, tx pgx.Tx, key, method, tmpl, target string, body any) (IdempotencyResult, string, error) {
-	hash := payloadHash(body)
+	hash, err := payloadHash(body)
+	if err != nil {
+		return IdempotencyResult{}, "", err
+	}
 	var status int
 	var raw []byte
 	var existing string
@@ -170,10 +202,10 @@ func (s *Store) CheckIdempotency(ctx context.Context, tx pgx.Tx, key, method, tm
 	} else {
 		row = s.Pool.QueryRow(ctx, q, key, method, tmpl, target)
 	}
-	err := row.Scan(&existing, &status, &raw)
+	err = row.Scan(&existing, &status, &raw)
 	if err == nil {
 		if existing != hash {
-			return IdempotencyResult{}, "", fmt.Errorf("IDEMPOTENCY_KEY_REUSED")
+			return IdempotencyResult{}, "", ErrIdempotencyReused
 		}
 		return IdempotencyResult{Replay: true, Status: status, Body: raw}, hash, nil
 	}
@@ -184,27 +216,33 @@ func (s *Store) CheckIdempotency(ctx context.Context, tx pgx.Tx, key, method, tm
 }
 
 func (s *Store) SaveIdempotency(ctx context.Context, tx pgx.Tx, key, method, tmpl, target, hash string, status int, body any) error {
-	raw, _ := json.Marshal(body)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
 	q := `INSERT INTO idempotency_keys(key,method,path_template,target_id,request_hash,status,body) VALUES($1,$2,$3,$4,$5,$6,$7)
-		ON CONFLICT DO NOTHING`
+		ON CONFLICT (key,method,path_template,target_id) DO NOTHING`
 	if tx != nil {
 		_, err := tx.Exec(ctx, q, key, method, tmpl, target, hash, status, raw)
 		return err
 	}
-	_, err := s.Pool.Exec(ctx, q, key, method, tmpl, target, hash, status, raw)
+	_, err = s.Pool.Exec(ctx, q, key, method, tmpl, target, hash, status, raw)
 	return err
 }
 
 // --- events ---
 
 func (s *Store) AppendEvent(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, assignmentID, riderID *uuid.UUID, event string, detail any) error {
-	raw, _ := json.Marshal(detail)
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
 	q := `INSERT INTO assignment_events(order_id,assignment_id,rider_id,event,detail) VALUES($1,$2,$3,$4,$5)`
 	if tx != nil {
 		_, err := tx.Exec(ctx, q, orderID, assignmentID, riderID, event, raw)
 		return err
 	}
-	_, err := s.Pool.Exec(ctx, q, orderID, assignmentID, riderID, event, raw)
+	_, err = s.Pool.Exec(ctx, q, orderID, assignmentID, riderID, event, raw)
 	return err
 }
 
@@ -215,7 +253,7 @@ func (s *Store) ListEvents(ctx context.Context, orderID uuid.UUID) ([]Assignment
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AssignmentEvent
+	out := []AssignmentEvent{}
 	for rows.Next() {
 		var e AssignmentEvent
 		var raw []byte
