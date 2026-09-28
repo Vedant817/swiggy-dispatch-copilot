@@ -111,6 +111,18 @@ func (s *Server) handleOrderTransition(w http.ResponseWriter, r *http.Request, i
 	if !owned {
 		return
 	}
+	if to == domain.OrderCancelled {
+		o, err := s.Store.CancelOrder(r.Context(), id, r.Header.Get("Idempotency-Key"), tmpl)
+		if err != nil {
+			s.abortIdem(r, tmpl, id.String())
+			if !mapStoreError(w, r, err) {
+				writeError(w, r, 500, "INTERNAL", "cancel failed")
+			}
+			return
+		}
+		writeJSON(w, 200, map[string]any{"order": o})
+		return
+	}
 	o, err := s.Store.SetOrderStatus(r.Context(), nil, id, okFrom, to)
 	if err != nil {
 		s.abortIdem(r, tmpl, id.String())

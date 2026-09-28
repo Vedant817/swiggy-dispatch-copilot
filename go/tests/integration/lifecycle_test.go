@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,5 +126,105 @@ func TestMigrateIsRerunnable(t *testing.T) {
 	}
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatalf("third migrate: %v", err)
+	}
+}
+
+func TestCancelOfferingReleasesRiderAndReplays(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	rest, err := st.CreateRestaurant(ctx, "cancel-offer-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rider, err := st.CreateRider(ctx, 12.951, 77.601, 4.9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := st.CreateOrder(ctx, rest.ID, "vip", time.Now().Add(30*time.Minute), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/orders/" + order.ID.String()
+	for _, step := range []string{"prepare", "ready"} {
+		if code, _ := doReq(t, srv, "POST", path+"/"+step, nil, nil); code != 200 {
+			t.Fatalf("%s returned %d", step, code)
+		}
+	}
+	code, body := doReq(t, srv, "POST", path+"/assign", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 201 {
+		t.Fatalf("offer returned %d: %v", code, body)
+	}
+	assignmentID := body["assignment"].(map[string]any)["id"].(string)
+	key := uuid.NewString()
+	for i := 0; i < 2; i++ {
+		code, body = doReq(t, srv, "POST", path+"/cancel", nil, map[string]string{"Idempotency-Key": key})
+		if code != 200 || body["order"].(map[string]any)["status"] != "cancelled" {
+			t.Fatalf("cancel attempt %d returned %d: %v", i, code, body)
+		}
+	}
+	assignment, err := st.GetAssignment(ctx, uuid.MustParse(assignmentID))
+	if err != nil || assignment.Status != "cancelled" {
+		t.Fatalf("assignment after cancel: %v %v", assignment.Status, err)
+	}
+	gotRider, err := st.GetRider(ctx, rider.ID)
+	if err != nil || gotRider.Status != "available" {
+		t.Fatalf("rider after cancel: %v %v", gotRider.Status, err)
+	}
+	if code, _ := doReq(t, srv, "POST", "/v1/assignments/"+assignmentID+"/accept", nil, map[string]string{"Idempotency-Key": uuid.NewString()}); code != 409 {
+		t.Fatalf("stale accept returned %d, want 409", code)
+	}
+	if n, err := st.CountActiveAssignments(ctx, order.ID); err != nil || n != 0 {
+		t.Fatalf("active assignments after cancel: %d %v", n, err)
+	}
+}
+
+func TestCancelAndAcceptNeverLeaveActiveCancelledOrder(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	rest, err := st.CreateRestaurant(ctx, "cancel-race-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 12; attempt++ {
+		if _, err := st.CreateRider(ctx, 12.951, 77.601, 4.9); err != nil {
+			t.Fatal(err)
+		}
+		order, err := st.CreateOrder(ctx, rest.ID, "vip", time.Now().Add(30*time.Minute), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := "/v1/orders/" + order.ID.String()
+		for _, step := range []string{"prepare", "ready"} {
+			if code, _ := doReq(t, srv, "POST", path+"/"+step, nil, nil); code != 200 {
+				t.Fatalf("%s returned %d", step, code)
+			}
+		}
+		code, body := doReq(t, srv, "POST", path+"/assign", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+		if code != 201 {
+			t.Fatalf("offer returned %d: %v", code, body)
+		}
+		assignmentID := body["assignment"].(map[string]any)["id"].(string)
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			codes[0], _ = doReq(t, srv, "POST", path+"/cancel", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+		}()
+		go func() {
+			defer wg.Done()
+			codes[1], _ = doReq(t, srv, "POST", "/v1/assignments/"+assignmentID+"/accept", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+		}()
+		wg.Wait()
+		if codes[0] != 200 || (codes[1] != 200 && codes[1] != 409) {
+			t.Fatalf("attempt %d: cancel=%d accept=%d", attempt, codes[0], codes[1])
+		}
+		got, err := st.GetOrder(ctx, order.ID)
+		if err != nil || got.Status != "cancelled" {
+			t.Fatalf("attempt %d: order=%s %v", attempt, got.Status, err)
+		}
+		if active, err := st.CountActiveAssignments(ctx, order.ID); err != nil || active != 0 {
+			t.Fatalf("attempt %d: active=%d %v", attempt, active, err)
+		}
 	}
 }

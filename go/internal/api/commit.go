@@ -92,10 +92,21 @@ func (s *Server) handleCommitProposal(w http.ResponseWriter, r *http.Request, id
 		fail(409, "ORDER_STATE_CONFLICT", "order "+ostatus)
 		return
 	}
+	// Supersede current active offer if any.
+	var oldID *uuid.UUID
+	var oldRider *uuid.UUID
+	var oldAid, oldRid uuid.UUID
+	err = tx.QueryRow(r.Context(),
+		`SELECT id,rider_id FROM assignments WHERE order_id=$1 AND status IN ('offered','accepted') FOR UPDATE`, oid).
+		Scan(&oldAid, &oldRid)
+	if err != nil && err != pgx.ErrNoRows {
+		fail(500, "INTERNAL", "active lookup failed")
+		return
+	}
 	var rstatus string
 	var rlat, rlng, rrating float64
-	if err := tx.QueryRow(r.Context(), `SELECT status,lat,lng,rating FROM riders WHERE id=$1 FOR UPDATE`, rid).Scan(&rstatus, &rlat, &rlng, &rrating); err != nil {
-		if err == pgx.ErrNoRows {
+	if lockErr := tx.QueryRow(r.Context(), `SELECT status,lat,lng,rating FROM riders WHERE id=$1 FOR UPDATE`, rid).Scan(&rstatus, &rlat, &rlng, &rrating); lockErr != nil {
+		if lockErr == pgx.ErrNoRows {
 			fail(404, "RIDER_NOT_FOUND", "rider not found")
 			return
 		}
@@ -106,13 +117,6 @@ func (s *Server) handleCommitProposal(w http.ResponseWriter, r *http.Request, id
 		fail(409, "RIDER_STATE_CONFLICT", "rider "+rstatus)
 		return
 	}
-	// Supersede current active offer if any.
-	var oldID *uuid.UUID
-	var oldRider *uuid.UUID
-	var oldAid, oldRid uuid.UUID
-	err = tx.QueryRow(r.Context(),
-		`SELECT id,rider_id FROM assignments WHERE order_id=$1 AND status IN ('offered','accepted') FOR UPDATE`, oid).
-		Scan(&oldAid, &oldRid)
 	if err == nil {
 		if _, err := tx.Exec(r.Context(), `UPDATE assignments SET status=$1 WHERE id=$2 AND status IN ('offered','accepted')`, domain.AssignSuperseded, oldAid); err != nil {
 			fail(500, "INTERNAL", "supersede failed")

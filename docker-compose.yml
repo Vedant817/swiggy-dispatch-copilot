@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: dispatch
-      POSTGRES_PASSWORD: dispatch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dispatch}
       POSTGRES_DB: dispatch
     ports:
       - "5432:5432"
@@ -30,13 +30,15 @@ services:
       context: .
       dockerfile: Dockerfile.api
     environment:
-      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch?sslmode=disable
+      DATABASE_URL: postgres://dispatch:${POSTGRES_PASSWORD:-dispatch}@postgres:5432/dispatch?sslmode=disable
       REDIS_ADDR: redis:6379
       CONFIG_PATH: /app/configs/default.yaml
       APP_ENV: ${APP_ENV:-local}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       OPS_TOKEN: ${OPS_TOKEN:-}
       AGENT_TOKEN: ${AGENT_TOKEN:-}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
     ports:
       - "8080:8080"
     depends_on:
@@ -57,12 +59,10 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     environment:
-      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch?sslmode=disable
+      DATABASE_URL: postgres://dispatch:${POSTGRES_PASSWORD:-dispatch}@postgres:5432/dispatch?sslmode=disable
       REDIS_ADDR: redis:6379
       CONFIG_PATH: /app/configs/default.yaml
       APP_ENV: ${APP_ENV:-local}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
-      OPS_TOKEN: ${OPS_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,16 +74,16 @@ services:
       - ./configs:/app/configs:ro
 
   agent:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
     profiles: ["agent"]
     working_dir: /app
     command: ["python", "-m", "app.main", "--help"]
     environment:
       AGENT_BASE_URL: http://api:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    volumes:
-      - ./agent:/app/app:ro
-      - ./configs:/app/configs:ro
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
     depends_on:
       api:
         condition: service_started

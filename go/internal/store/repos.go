@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -272,6 +273,11 @@ func (s *Store) ClaimIdempotency(ctx context.Context, key, method, tmpl, target 
 }
 
 func (s *Store) CompleteIdempotency(ctx context.Context, key, method, tmpl, target string, status int, body any) error {
+	return s.CompleteIdempotencyTx(ctx, nil, key, method, tmpl, target, status, body)
+}
+
+// CompleteIdempotencyTx stores the response in the same transaction as the effect.
+func (s *Store) CompleteIdempotencyTx(ctx context.Context, tx pgx.Tx, key, method, tmpl, target string, status int, body any) error {
 	if key == "" {
 		return nil
 	}
@@ -279,9 +285,16 @@ func (s *Store) CompleteIdempotency(ctx context.Context, key, method, tmpl, targ
 	if err != nil {
 		return err
 	}
-	_, err = s.Pool.Exec(ctx,
-		`UPDATE idempotency_keys SET status=$5,body=$6 WHERE key=$1 AND method=$2 AND path_template=$3 AND target_id=$4`,
-		key, method, tmpl, target, status, raw)
+	q := `UPDATE idempotency_keys SET status=$5,body=$6 WHERE key=$1 AND method=$2 AND path_template=$3 AND target_id=$4 AND status=-1`
+	var tag pgconn.CommandTag
+	if tx != nil {
+		tag, err = tx.Exec(ctx, q, key, method, tmpl, target, status, raw)
+	} else {
+		tag, err = s.Pool.Exec(ctx, q, key, method, tmpl, target, status, raw)
+	}
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrStateConflict
+	}
 	return err
 }
 

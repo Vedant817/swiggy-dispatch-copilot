@@ -204,6 +204,18 @@ func (s *Service) Accept(ctx context.Context, assignmentID uuid.UUID) (store.Ass
 		return store.Assignment{}, err
 	}
 	defer tx.Rollback(ctx)
+	var orderID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT order_id FROM assignments WHERE id=$1`, assignmentID).Scan(&orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Assignment{}, fmt.Errorf("ASSIGNMENT_NOT_FOUND")
+	}
+	if err != nil {
+		return store.Assignment{}, err
+	}
+	var orderStatus string
+	if err = tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&orderStatus); err != nil {
+		return store.Assignment{}, err
+	}
 	var a store.Assignment
 	var breakdown []byte
 	err = tx.QueryRow(ctx,
@@ -217,10 +229,6 @@ func (s *Service) Accept(ctx context.Context, assignmentID uuid.UUID) (store.Ass
 	}
 	if a.Status != domain.AssignOffered {
 		return a, fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: %s", a.Status)
-	}
-	var orderStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 FOR UPDATE`, a.OrderID).Scan(&orderStatus); err != nil {
-		return a, err
 	}
 	if orderStatus != domain.OrderOffering {
 		return a, fmt.Errorf("ORDER_STATE_CONFLICT: order %s", orderStatus)
@@ -263,7 +271,18 @@ func (s *Service) Reject(ctx context.Context, assignmentID uuid.UUID) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var orderID, riderID uuid.UUID
+	var orderID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT order_id FROM assignments WHERE id=$1`, assignmentID).Scan(&orderID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("ASSIGNMENT_NOT_FOUND")
+		}
+		return err
+	}
+	var orderStatus string
+	if err = tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&orderStatus); err != nil {
+		return err
+	}
+	var riderID uuid.UUID
 	var status string
 	err = tx.QueryRow(ctx, `SELECT order_id,rider_id,status FROM assignments WHERE id=$1 FOR UPDATE`, assignmentID).Scan(&orderID, &riderID, &status)
 	if err != nil {
@@ -274,6 +293,9 @@ func (s *Service) Reject(ctx context.Context, assignmentID uuid.UUID) error {
 	}
 	if status != domain.AssignOffered {
 		return fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: %s", status)
+	}
+	if orderStatus != domain.OrderOffering {
+		return fmt.Errorf("ORDER_STATE_CONFLICT: order %s", orderStatus)
 	}
 	_, _ = tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2`, domain.AssignCancelled, assignmentID)
 	_, _ = tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2`, domain.RiderAvailable, riderID)
@@ -287,15 +309,11 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	// Selection in explicit tx so SKIP LOCKED actually skips rows locked by peers.
-	selTx, err := s.Store.Pool.Begin(ctx)
+	// Select IDs without holding assignment locks; each attempt locks its order
+	// first and rechecks the offer inside its own transaction.
+	rows, err := s.Store.Pool.Query(ctx,
+		`SELECT id FROM assignments WHERE status=$1 AND expires_at < now() ORDER BY expires_at LIMIT $2`, domain.AssignOffered, limit)
 	if err != nil {
-		return 0, err
-	}
-	rows, err := selTx.Query(ctx,
-		`SELECT id FROM assignments WHERE status=$1 AND expires_at < now() ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED`, domain.AssignOffered, limit)
-	if err != nil {
-		_ = selTx.Rollback(ctx)
 		return 0, err
 	}
 	var ids []uuid.UUID
@@ -308,10 +326,6 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		_ = selTx.Rollback(ctx)
-		return 0, err
-	}
-	if err := selTx.Commit(ctx); err != nil {
 		return 0, err
 	}
 	n := 0
@@ -320,13 +334,23 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 		if err != nil {
 			continue
 		}
-		var orderID, riderID uuid.UUID
+		var orderID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT order_id FROM assignments WHERE id=$1`, id).Scan(&orderID); err != nil {
+			_ = tx.Rollback(ctx)
+			continue
+		}
+		var orderStatus string
+		if err := tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&orderStatus); err != nil {
+			_ = tx.Rollback(ctx)
+			continue
+		}
+		var riderID uuid.UUID
 		var status string
 		if err := tx.QueryRow(ctx, `SELECT order_id,rider_id,status FROM assignments WHERE id=$1 FOR UPDATE`, id).Scan(&orderID, &riderID, &status); err != nil {
 			_ = tx.Rollback(ctx)
 			continue
 		}
-		if status != domain.AssignOffered {
+		if status != domain.AssignOffered || orderStatus != domain.OrderOffering {
 			_ = tx.Rollback(ctx)
 			continue
 		}

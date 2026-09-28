@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,41 @@ func testDSN(t *testing.T) string {
 		t.Skip("DATABASE_URL not set")
 	}
 	return dsn
+}
+
+func TestConcurrentMigrationsRecordChecksums(t *testing.T) {
+	ctx := context.Background()
+	dsn := testDSN(t)
+	var wg sync.WaitGroup
+	errs := make([]error, 6)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			st, err := Connect(ctx, dsn)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			defer st.Close()
+			errs[i] = st.Migrate(ctx)
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent migration: %v", err)
+		}
+	}
+	st, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var applied int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM _migrations WHERE checksum IS NOT NULL`).Scan(&applied); err != nil || applied != 4 {
+		t.Fatalf("applied migrations: %d %v", applied, err)
+	}
 }
 
 func TestMigrateAndConstraints(t *testing.T) {

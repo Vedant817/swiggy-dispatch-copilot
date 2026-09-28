@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -87,6 +88,25 @@ func Load(path string) (Config, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// ValidateProductionAuth is called by the public API process. The background
+// worker has no HTTP role and does not receive the role secrets.
+func (c Config) ValidateProductionAuth() error {
+	if strings.EqualFold(c.AppEnv(), "prod") {
+		seen := make(map[string]string)
+		for _, role := range []string{"SERVICE_TOKEN", "AGENT_TOKEN", "OPS_TOKEN", "WEBHOOK_TOKEN", "ADMIN_TOKEN"} {
+			value := os.Getenv(role)
+			if len(value) < 24 {
+				return fmt.Errorf("%s must have at least 24 characters in prod", role)
+			}
+			if other, ok := seen[value]; ok {
+				return fmt.Errorf("%s and %s must have different values in prod", role, other)
+			}
+			seen[value] = role
+		}
+	}
+	return nil
 }
 
 func (c Config) Validate() error {

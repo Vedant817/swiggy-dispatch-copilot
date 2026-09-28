@@ -36,7 +36,12 @@ func New(cfg config.Config, st *store.Store, rdb *redisx.Client) *Server {
 func (s *Server) routes() {
 	s.Mux.HandleFunc("/healthz", s.handleLiveness)
 	s.Mux.HandleFunc("/readyz", s.handleReadiness)
-	s.Mux.HandleFunc("/metrics", s.handleMetrics)
+	s.Mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(s.Cfg.AppEnv(), "prod") && !s.requireOps(w, r) {
+			return
+		}
+		s.handleMetrics(w, r)
+	})
 	s.Mux.HandleFunc("/v1/", s.dispatchV1)
 	s.Mux.HandleFunc("/admin/", s.dispatchAdmin)
 }
@@ -61,6 +66,9 @@ func parseUUID(s string) (uuid.UUID, bool) {
 }
 
 func (s *Server) dispatchV1(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeV1(w, r) {
+		return
+	}
 	p := strings.TrimPrefix(r.URL.Path, "/v1")
 	// Orders collection.
 	if p == "/orders" {

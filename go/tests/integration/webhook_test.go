@@ -55,3 +55,52 @@ func TestWebhookCancelRecovers(t *testing.T) {
 		t.Fatalf("reoffer %d", n)
 	}
 }
+
+func TestStaleOfflineEventCannotDisableNewAssignment(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	rest, err := st.CreateRestaurant(ctx, "offline-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rider, err := st.CreateRider(ctx, 12.951, 77.601, 4.9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.CreateOrder(ctx, rest.ID, "vip", time.Now().Add(30*time.Minute), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/orders/" + o.ID.String()
+	for _, step := range []string{"prepare", "ready"} {
+		if code, _ := doReq(t, srv, "POST", path+"/"+step, nil, nil); code != 200 {
+			t.Fatalf("%s: %d", step, code)
+		}
+	}
+	code, offer := doReq(t, srv, "POST", path+"/assign", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 201 {
+		t.Fatalf("offer: %d %v", code, offer)
+	}
+	oldID := offer["assignment"].(map[string]any)["id"].(string)
+	code, _ = doReq(t, srv, "POST", "/v1/webhooks/rider", map[string]any{"event_type": "cancelled", "assignment_id": oldID}, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 200 {
+		t.Fatalf("cancel webhook: %d", code)
+	}
+	code, next := doReq(t, srv, "POST", path+"/assign", nil, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 201 {
+		t.Fatalf("reoffer: %d %v", code, next)
+	}
+	code, _ = doReq(t, srv, "POST", "/v1/webhooks/rider", map[string]any{"event_type": "offline", "assignment_id": oldID}, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 409 {
+		t.Fatalf("stale offline: %d; want 409", code)
+	}
+	got, err := st.GetRider(ctx, rider.ID)
+	if err != nil || got.Status != "offered" {
+		t.Fatalf("new offer rider status: %s %v", got.Status, err)
+	}
+	wrong := uuid.NewString()
+	code, _ = doReq(t, srv, "POST", "/v1/webhooks/rider", map[string]any{"event_type": "cancelled", "order_id": o.ID.String(), "rider_id": wrong}, map[string]string{"Idempotency-Key": uuid.NewString()})
+	if code != 400 {
+		t.Fatalf("mismatched rider: %d; want 400", code)
+	}
+}

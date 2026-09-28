@@ -2,9 +2,12 @@ package api
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/obs"
 )
@@ -97,10 +100,10 @@ func decodeJSON(r *http.Request, v any) error {
 // Empty tokens mean open local mode (dev/test). Set ADMIN_TOKEN/OPS_TOKEN to enforce.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	want := s.Cfg.AdminToken()
-	if want == "" {
+	if want == "" && !strings.EqualFold(s.Cfg.AppEnv(), "prod") {
 		return true
 	}
-	if r.Header.Get("X-Admin-Token") != want {
+	if !matchesToken(r.Header.Get("X-Admin-Token"), want) {
 		writeError(w, r, 401, "UNAUTHORIZED", "admin token required")
 		return false
 	}
@@ -109,12 +112,52 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 
 func (s *Server) requireOps(w http.ResponseWriter, r *http.Request) bool {
 	want := s.Cfg.OpsToken()
-	if want == "" {
+	if want == "" && !strings.EqualFold(s.Cfg.AppEnv(), "prod") {
 		return true
 	}
-	if r.Header.Get("X-Ops-Token") != want {
+	if !matchesToken(r.Header.Get("X-Ops-Token"), want) {
 		writeError(w, r, 403, "FORBIDDEN", "ops token required")
 		return false
 	}
 	return true
+}
+
+func matchesToken(got, want string) bool {
+	return want != "" && len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// authorizeV1 permits only the capabilities assigned to each production role.
+// Local mode remains token-optional for the generated-data demo.
+func (s *Server) authorizeV1(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.EqualFold(s.Cfg.AppEnv(), "prod") {
+		if r.URL.Path == "/v1/webhooks/rider" {
+			if token := os.Getenv("WEBHOOK_TOKEN"); token != "" && !matchesToken(r.Header.Get("X-Webhook-Token"), token) {
+				writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "webhook token required")
+				return false
+			}
+		}
+		return true
+	}
+	path := r.URL.Path
+	if strings.HasSuffix(path, "/commit") || (strings.HasPrefix(path, "/v1/proposals/") && strings.HasSuffix(path, "/reject")) {
+		return s.requireOps(w, r)
+	}
+	if path == "/v1/webhooks/rider" {
+		if matchesToken(r.Header.Get("X-Webhook-Token"), os.Getenv("WEBHOOK_TOKEN")) {
+			return true
+		}
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "webhook token required")
+		return false
+	}
+	if r.Method == http.MethodGet || (path == "/v1/proposals" && r.Method == http.MethodPost) {
+		if matchesToken(r.Header.Get("X-Agent-Token"), os.Getenv("AGENT_TOKEN")) ||
+			matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN")) ||
+			matchesToken(r.Header.Get("X-Ops-Token"), os.Getenv("OPS_TOKEN")) {
+			return true
+		}
+	} else if matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN")) {
+		return true
+	}
+	writeError(w, r, http.StatusForbidden, "FORBIDDEN", "insufficient role for API operation")
+	return false
 }

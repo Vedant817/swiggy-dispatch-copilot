@@ -33,6 +33,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	if err := cfg.ValidateProductionAuth(); err != nil {
+		log.Fatalf("production auth: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	st, err := store.Connect(ctx, cfg.PostgresDSN())

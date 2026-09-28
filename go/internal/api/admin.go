@@ -15,7 +15,7 @@ type seedWorldReq struct {
 }
 
 func (s *Server) dispatchAdmin(w http.ResponseWriter, r *http.Request) {
-	if strings.ToLower(s.Cfg.AppEnv()) == "prod" {
+	if strings.EqualFold(s.Cfg.AppEnv(), "prod") {
 		writeError(w, r, 403, "FORBIDDEN", "admin disabled in prod")
 		return
 	}

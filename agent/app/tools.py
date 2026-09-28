@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 
 import httpx
 from pydantic import BaseModel
@@ -22,6 +23,10 @@ class DispatchClient:
         self.calls: list[ToolCall] = []
         self._client = httpx.Client(timeout=timeout)
 
+    def _auth(self) -> dict[str, str]:
+        token = os.getenv("AGENT_TOKEN")
+        return {"X-Agent-Token": token} if token else {}
+
     def _guard(self, name: str):
         if len(self.calls) >= self.max_calls:
             raise RuntimeError(f"tool budget exhausted at {name}")
@@ -33,7 +38,7 @@ class DispatchClient:
     def _get(self, name: str, path: str, headers: dict | None = None):
         start = self._guard(name)
         try:
-            r = self._client.get(self.base_url + path, headers=headers)
+            r = self._client.get(self.base_url + path, headers={**self._auth(), **(headers or {})})
             r.raise_for_status()
             self._record(name, start, True)
             return r.json()
@@ -44,7 +49,7 @@ class DispatchClient:
     def _post(self, name: str, path: str, body: dict | None = None, headers: dict | None = None):
         start = self._guard(name)
         try:
-            hdrs = {"Content-Type": "application/json"}
+            hdrs = {"Content-Type": "application/json", **self._auth()}
             if headers:
                 hdrs.update(headers)
             # Stable idempotency per tool call chain: caller may override.
