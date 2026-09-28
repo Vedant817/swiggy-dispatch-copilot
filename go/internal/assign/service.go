@@ -4,6 +4,7 @@ package assign
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,7 +15,16 @@ import (
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
+}
 
 type Service struct {
 	Cfg      config.Config
@@ -45,10 +55,11 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 	token := uuid.NewString()
 	if s.Redis != nil {
 		ok, err := s.Redis.Acquire(ctx, lockKey, token, s.Cfg.Assign.LockTTL)
-		if err == nil && !ok {
+		if err != nil {
+			obs.Log("redis_lock_error", map[string]any{"order_id": orderID.String(), "error": err.Error()})
+		} else if !ok {
 			return store.Assignment{}, fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: assign in progress")
-		}
-		if err == nil {
+		} else {
 			defer s.Redis.Release(ctx, lockKey, token)
 		}
 	}
@@ -71,7 +82,7 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 		return store.Assignment{}, err
 	}
 	cands, err := s.Store.Pool.Query(ctx,
-		`SELECT id,lat,lng,rating FROM riders WHERE status='available' ORDER BY rating DESC LIMIT $1`, s.Cfg.Assign.MaxCandidates*5)
+		`SELECT id,lat,lng,rating FROM riders WHERE status=$1 ORDER BY rating DESC LIMIT $2`, domain.RiderAvailable, s.Cfg.Assign.MaxCandidates*5)
 	if err != nil {
 		return store.Assignment{}, err
 	}
@@ -80,25 +91,47 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 		lat    float64
 		lng    float64
 		rating float64
+		load   float64
 		score  domain.ScoreBreakdown
 	}
-	var scored []cand
+	var ids []uuid.UUID
+	var raw []cand
 	for cands.Next() {
 		var c cand
 		if err := cands.Scan(&c.id, &c.lat, &c.lng, &c.rating); err != nil {
 			cands.Close()
 			return store.Assignment{}, err
 		}
-		d := domain.HaversineKm(restLat, restLng, c.lat, c.lng)
-		c.score = domain.Score(d, 0, c.rating, order.Priority == "vip", weights(s.Cfg))
-		scored = append(scored, c)
+		raw = append(raw, c)
+		ids = append(ids, c.id)
 	}
 	cands.Close()
 	if cands.Err() != nil {
 		return store.Assignment{}, cands.Err()
 	}
-	if len(scored) == 0 {
+	if len(raw) == 0 {
 		return store.Assignment{}, fmt.Errorf("NO_RIDERS_AVAILABLE")
+	}
+	loads := map[string]float64{}
+	if len(ids) > 0 {
+		rows, err := s.Store.Pool.Query(ctx,
+			`SELECT rider_id,count(*) FROM assignments WHERE rider_id = ANY($1) AND status IN ('offered','accepted') GROUP BY rider_id`, ids)
+		if err == nil {
+			for rows.Next() {
+				var rid uuid.UUID
+				var n int
+				_ = rows.Scan(&rid, &n)
+				loads[rid.String()] = float64(n)
+			}
+			rows.Close()
+		}
+	}
+	scored := make([]cand, 0, len(raw))
+	for _, c := range raw {
+		d := domain.HaversineKm(restLat, restLng, c.lat, c.lng)
+		c.load = loads[c.id.String()]
+		c.score = domain.Score(d, c.load, c.rating, order.Priority == "vip", weights(s.Cfg))
+		scored = append(scored, c)
 	}
 	// Pick best score.
 	best := scored[0]
@@ -125,7 +158,7 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 		return store.Assignment{}, fmt.Errorf("ORDER_STATE_CONFLICT: order %s", ost)
 	}
 	// CAS rider.
-	tag, err := tx.Exec(ctx, `UPDATE riders SET status='offered',updated_at=now() WHERE id=$1 AND status='available'`, best.id)
+	tag, err := tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.RiderOffered, best.id, domain.RiderAvailable)
 	if err != nil {
 		return store.Assignment{}, err
 	}
@@ -142,11 +175,18 @@ func (s *Service) TryAssign(ctx context.Context, orderID uuid.UUID) (store.Assig
 		orderID, best.id, exp, best.score.Score, breakRaw).Scan(
 		&a.ID, &a.OrderID, &a.RiderID, &a.Status, &a.OfferedAt, &a.ExpiresAt, &a.AcceptedAt, &a.Score, &breakdown, &a.CreatedAt)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return store.Assignment{}, fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: duplicate active assignment")
+		}
 		return store.Assignment{}, err
 	}
 	_ = json.Unmarshal(breakdown, &a.ScoreBreakdown)
-	if _, err := tx.Exec(ctx, `UPDATE orders SET status='offering',updated_at=now() WHERE id=$1`, orderID); err != nil {
+	tag, err = tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.OrderOffering, orderID, domain.OrderReady)
+	if err != nil {
 		return store.Assignment{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return store.Assignment{}, fmt.Errorf("ORDER_STATE_CONFLICT: order no longer ready")
 	}
 	_ = s.Store.AppendEvent(ctx, tx, orderID, &a.ID, &best.id, "offer_created", map[string]any{"score": best.score})
 	if err := tx.Commit(ctx); err != nil {
@@ -178,23 +218,34 @@ func (s *Service) Accept(ctx context.Context, assignmentID uuid.UUID) (store.Ass
 	if a.Status != domain.AssignOffered {
 		return a, fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: %s", a.Status)
 	}
+	var orderStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 FOR UPDATE`, a.OrderID).Scan(&orderStatus); err != nil {
+		return a, err
+	}
+	if orderStatus != domain.OrderOffering {
+		return a, fmt.Errorf("ORDER_STATE_CONFLICT: order %s", orderStatus)
+	}
 	if time.Now().After(a.ExpiresAt) {
-		_, _ = tx.Exec(ctx, `UPDATE assignments SET status='expired' WHERE id=$1`, assignmentID)
-		_, _ = tx.Exec(ctx, `UPDATE riders SET status='available',updated_at=now() WHERE id=$1`, a.RiderID)
-		_, _ = tx.Exec(ctx, `UPDATE orders SET status='ready_for_assign',updated_at=now() WHERE id=$1`, a.OrderID)
+		_, _ = tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2`, domain.AssignExpired, assignmentID)
+		_, _ = tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2`, domain.RiderAvailable, a.RiderID)
+		_, _ = tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2`, domain.OrderReady, a.OrderID)
 		_ = s.Store.AppendEvent(ctx, tx, a.OrderID, &a.ID, &a.RiderID, "offer_expired", nil)
 		_ = tx.Commit(ctx)
 		s.Counters.Inc("offers_expired")
 		return a, fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: expired")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE assignments SET status='accepted',accepted_at=now() WHERE id=$1`, assignmentID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE assignments SET status=$1,accepted_at=now() WHERE id=$2 AND status=$3`, domain.AssignAccepted, assignmentID, domain.AssignOffered); err != nil {
 		return a, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE riders SET status='busy',updated_at=now() WHERE id=$1`, a.RiderID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2`, domain.RiderBusy, a.RiderID); err != nil {
 		return a, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE orders SET status='assigned',updated_at=now() WHERE id=$1`, a.OrderID); err != nil {
+	tag, err := tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.OrderAssigned, a.OrderID, domain.OrderOffering)
+	if err != nil {
 		return a, err
+	}
+	if tag.RowsAffected() == 0 {
+		return a, fmt.Errorf("ORDER_STATE_CONFLICT: order no longer offering")
 	}
 	_ = s.Store.AppendEvent(ctx, tx, a.OrderID, &a.ID, &a.RiderID, "offer_accepted", nil)
 	if err := tx.Commit(ctx); err != nil {
@@ -224,9 +275,9 @@ func (s *Service) Reject(ctx context.Context, assignmentID uuid.UUID) error {
 	if status != domain.AssignOffered {
 		return fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: %s", status)
 	}
-	_, _ = tx.Exec(ctx, `UPDATE assignments SET status='cancelled' WHERE id=$1`, assignmentID)
-	_, _ = tx.Exec(ctx, `UPDATE riders SET status='available',updated_at=now() WHERE id=$1`, riderID)
-	_, _ = tx.Exec(ctx, `UPDATE orders SET status='ready_for_assign',updated_at=now() WHERE id=$1 AND status='offering'`, orderID)
+	_, _ = tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2`, domain.AssignCancelled, assignmentID)
+	_, _ = tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2`, domain.RiderAvailable, riderID)
+	_, _ = tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.OrderReady, orderID, domain.OrderOffering)
 	_ = s.Store.AppendEvent(ctx, tx, orderID, &assignmentID, &riderID, "offer_rejected", nil)
 	return tx.Commit(ctx)
 }
@@ -237,7 +288,7 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 		limit = 100
 	}
 	rows, err := s.Store.Pool.Query(ctx,
-		`SELECT id FROM assignments WHERE status='offered' AND expires_at < now() ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
+		`SELECT id FROM assignments WHERE status=$1 AND expires_at < now() ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED`, domain.AssignOffered, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -264,9 +315,9 @@ func (s *Service) ExpireDue(ctx context.Context, limit int) (int, error) {
 			_ = tx.Rollback(ctx)
 			continue
 		}
-		_, _ = tx.Exec(ctx, `UPDATE assignments SET status='expired' WHERE id=$1`, id)
-		_, _ = tx.Exec(ctx, `UPDATE riders SET status='available',updated_at=now() WHERE id=$1 AND status='offered'`, riderID)
-		_, _ = tx.Exec(ctx, `UPDATE orders SET status='ready_for_assign',updated_at=now() WHERE id=$1 AND status='offering'`, orderID)
+		_, _ = tx.Exec(ctx, `UPDATE assignments SET status=$1 WHERE id=$2`, domain.AssignExpired, id)
+		_, _ = tx.Exec(ctx, `UPDATE riders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.RiderAvailable, riderID, domain.RiderOffered)
+		_, _ = tx.Exec(ctx, `UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status=$3`, domain.OrderReady, orderID, domain.OrderOffering)
 		_ = s.Store.AppendEvent(ctx, tx, orderID, &id, &riderID, "offer_expired", nil)
 		if err := tx.Commit(ctx); err == nil {
 			n++

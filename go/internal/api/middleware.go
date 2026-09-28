@@ -9,7 +9,39 @@ import (
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/obs"
 )
 
-// idempotency guard: returns (replayed bool). When no key, returns false.
+// beginIdem atomically claims an idempotency key. owned=false means response already written.
+func (s *Server) beginIdem(w http.ResponseWriter, r *http.Request, tmpl, target string, body any) (owned bool, hash string) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		return true, ""
+	}
+	claimed, res, h, err := s.Store.ClaimIdempotency(r.Context(), key, r.Method, tmpl, target, body)
+	if err != nil {
+		if !mapStoreError(w, r, err) {
+			writeError(w, r, 500, "INTERNAL", "idempotency check failed")
+		}
+		return false, ""
+	}
+	if !claimed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(res.Status)
+		_, _ = w.Write(res.Body)
+		s.Counters.Inc("idempotency_replays")
+		obs.Log("idempotent_replay", map[string]any{"key": key, "template": tmpl, "target": target})
+		return false, ""
+	}
+	return true, h
+}
+
+func (s *Server) endIdem(r *http.Request, tmpl, target, hash string, status int, body any) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		return
+	}
+	_ = s.Store.CompleteIdempotency(r.Context(), key, r.Method, tmpl, target, status, body)
+}
+
+// checkIdem kept for read-only callers that only need replay without claiming.
 func (s *Server) checkIdem(w http.ResponseWriter, r *http.Request, tmpl, target string, body any) (bool, string) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {

@@ -33,8 +33,8 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := map[string]any{"restaurant_id": req.RestaurantID.String(), "priority": priority}
-	replayed, hash := s.checkIdem(w, r, "POST /v1/orders", "", body)
-	if replayed {
+	owned, hash := s.beginIdem(w, r, "POST /v1/orders", "", body)
+	if !owned {
 		return
 	}
 	var key *string
@@ -50,7 +50,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.Store.AppendEvent(r.Context(), nil, o.ID, nil, nil, "order_created", map[string]any{"priority": priority})
 	resp := map[string]any{"order": o}
-	s.saveIdem(r, "POST /v1/orders", "", hash, 201, resp)
+	s.endIdem(r, "POST /v1/orders", "", hash, 201, resp)
 	writeJSON(w, 201, resp)
 }
 
@@ -75,8 +75,8 @@ func (s *Server) handleOrderTransition(w http.ResponseWriter, r *http.Request, i
 	tmpl := r.Method + " " + r.URL.Path
 	// normalize template: replace id with {id}
 	tmpl = strings.Replace(tmpl, id.String(), "{id}", 1)
-	replayed, hash := s.checkIdem(w, r, tmpl, id.String(), body)
-	if replayed {
+	owned, hash := s.beginIdem(w, r, tmpl, id.String(), body)
+	if !owned {
 		return
 	}
 	o, err := s.Store.SetOrderStatus(r.Context(), nil, id, okFrom, to)
@@ -88,7 +88,7 @@ func (s *Server) handleOrderTransition(w http.ResponseWriter, r *http.Request, i
 	}
 	_ = s.Store.AppendEvent(r.Context(), nil, id, nil, nil, event, map[string]any{"to": to})
 	resp := map[string]any{"order": o}
-	s.saveIdem(r, tmpl, id.String(), hash, 200, resp)
+	s.endIdem(r, tmpl, id.String(), hash, 200, resp)
 	writeJSON(w, 200, resp)
 }
 
@@ -107,7 +107,7 @@ func orderTargets() map[string]struct {
 		"pickup":  {domain.OrderPickedUp, []string{domain.OrderAssigned}, "order_pickup"},
 		"deliver": {domain.OrderDelivered, []string{domain.OrderPickedUp}, "order_deliver"},
 		"cancel": {domain.OrderCancelled, []string{
-			domain.OrderCreated, domain.OrderPreparing, domain.OrderReady, domain.OrderOffering,
+			domain.OrderCreated, domain.OrderPreparing, domain.OrderReady, domain.OrderOffering, domain.OrderAssigned,
 		}, "order_cancelled"},
 	}
 }

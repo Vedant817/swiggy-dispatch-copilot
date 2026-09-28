@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/assign"
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/config"
@@ -202,7 +203,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.Redis != nil {
-		ctx, cancel := context.WithTimeout(ctx, 2_000_000_000)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		if err := s.Redis.Ping(ctx); err != nil {
 			writeJSON(w, 503, map[string]string{"status": "redis_unavailable"})

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -227,6 +228,60 @@ func (s *Store) SaveIdempotency(ctx context.Context, tx pgx.Tx, key, method, tmp
 		return err
 	}
 	_, err = s.Pool.Exec(ctx, q, key, method, tmpl, target, hash, status, raw)
+	return err
+}
+
+// ClaimIdempotency atomically claims a key for execution.
+// claimed=true means caller owns execution and must call CompleteIdempotency.
+// claimed=false with Replay=true means return stored response.
+// In-progress (-1) returns a conflict so callers retry later.
+func (s *Store) ClaimIdempotency(ctx context.Context, key, method, tmpl, target string, body any) (bool, IdempotencyResult, string, error) {
+	hash, err := payloadHash(body)
+	if err != nil {
+		return false, IdempotencyResult{}, "", err
+	}
+	if key == "" {
+		return true, IdempotencyResult{}, hash, nil
+	}
+	tag, err := s.Pool.Exec(ctx,
+		`INSERT INTO idempotency_keys(key,method,path_template,target_id,request_hash,status,body)
+		 VALUES($1,$2,$3,$4,$5,-1,'{}') ON CONFLICT (key,method,path_template,target_id) DO NOTHING`,
+		key, method, tmpl, target, hash)
+	if err != nil {
+		return false, IdempotencyResult{}, "", err
+	}
+	if tag.RowsAffected() == 1 {
+		return true, IdempotencyResult{}, hash, nil
+	}
+	var existing string
+	var status int
+	var raw []byte
+	err = s.Pool.QueryRow(ctx,
+		`SELECT request_hash,status,body FROM idempotency_keys WHERE key=$1 AND method=$2 AND path_template=$3 AND target_id=$4`,
+		key, method, tmpl, target).Scan(&existing, &status, &raw)
+	if err != nil {
+		return false, IdempotencyResult{}, "", err
+	}
+	if existing != hash {
+		return false, IdempotencyResult{}, "", ErrIdempotencyReused
+	}
+	if status == -1 {
+		return false, IdempotencyResult{}, "", fmt.Errorf("ASSIGNMENT_STATE_CONFLICT: idempotent request in progress")
+	}
+	return false, IdempotencyResult{Replay: true, Status: status, Body: raw}, hash, nil
+}
+
+func (s *Store) CompleteIdempotency(ctx context.Context, key, method, tmpl, target string, status int, body any) error {
+	if key == "" {
+		return nil
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	_, err = s.Pool.Exec(ctx,
+		`UPDATE idempotency_keys SET status=$5,body=$6 WHERE key=$1 AND method=$2 AND path_template=$3 AND target_id=$4`,
+		key, method, tmpl, target, status, raw)
 	return err
 }
 

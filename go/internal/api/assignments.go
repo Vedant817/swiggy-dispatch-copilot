@@ -8,8 +8,8 @@ import (
 
 func (s *Server) handleEnqueueAssign(w http.ResponseWriter, r *http.Request, orderID uuid.UUID) {
 	body := map[string]any{"order_id": orderID.String()}
-	replayed, hash := s.checkIdem(w, r, "POST /v1/orders/{id}/assign", orderID.String(), body)
-	if replayed {
+	owned, hash := s.beginIdem(w, r, "POST /v1/orders/{id}/assign", orderID.String(), body)
+	if !owned {
 		return
 	}
 	a, err := s.Assign.TryAssign(r.Context(), orderID)
@@ -20,7 +20,7 @@ func (s *Server) handleEnqueueAssign(w http.ResponseWriter, r *http.Request, ord
 		return
 	}
 	resp := map[string]any{"assignment": a}
-	s.saveIdem(r, "POST /v1/orders/{id}/assign", orderID.String(), hash, 201, resp)
+	s.endIdem(r, "POST /v1/orders/{id}/assign", orderID.String(), hash, 201, resp)
 	writeJSON(w, 201, resp)
 }
 
@@ -37,8 +37,8 @@ func (s *Server) handleGetAssignment(w http.ResponseWriter, r *http.Request, id 
 
 func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	body := map[string]any{"action": "accept"}
-	replayed, hash := s.checkIdem(w, r, "POST /v1/assignments/{id}/accept", id.String(), body)
-	if replayed {
+	owned, hash := s.beginIdem(w, r, "POST /v1/assignments/{id}/accept", id.String(), body)
+	if !owned {
 		return
 	}
 	a, err := s.Assign.Accept(r.Context(), id)
@@ -49,14 +49,14 @@ func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, id uuid.UU
 		return
 	}
 	resp := map[string]any{"assignment": a}
-	s.saveIdem(r, "POST /v1/assignments/{id}/accept", id.String(), hash, 200, resp)
+	s.endIdem(r, "POST /v1/assignments/{id}/accept", id.String(), hash, 200, resp)
 	writeJSON(w, 200, resp)
 }
 
 func (s *Server) handleReject(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	body := map[string]any{"action": "reject"}
-	replayed, hash := s.checkIdem(w, r, "POST /v1/assignments/{id}/reject", id.String(), body)
-	if replayed {
+	owned, hash := s.beginIdem(w, r, "POST /v1/assignments/{id}/reject", id.String(), body)
+	if !owned {
 		return
 	}
 	if err := s.Assign.Reject(r.Context(), id); err != nil {
@@ -66,6 +66,6 @@ func (s *Server) handleReject(w http.ResponseWriter, r *http.Request, id uuid.UU
 		return
 	}
 	resp := map[string]any{"ok": true}
-	s.saveIdem(r, "POST /v1/assignments/{id}/reject", id.String(), hash, 200, resp)
+	s.endIdem(r, "POST /v1/assignments/{id}/reject", id.String(), hash, 200, resp)
 	writeJSON(w, 200, resp)
 }
