@@ -275,7 +275,7 @@ All tunables live in config or env. Business logic reads config structs — neve
 
 ### 8.1 Why generators exist
 
-World state (restaurants, riders, geospatial layout) and traffic (orders, location updates, cancels) must be **synthesized at runtime** from `generator.seed` + distributions in config. Evaluation scenarios are **compiled** from schema + seed into `evals/uites/*.json` by `evals/generate_suite.py`.
+World state (restaurants, riders, geospatial layout) and traffic (orders, location updates, cancels) must be **synthesized at runtime** from `generator.seed` + distributions in config. Evaluation scenarios are **compiled** from schema + seed into `evals/suites/*.json` by `evals/generate_suite.py`.
 
 This keeps demos and tests:
 
@@ -322,7 +322,11 @@ Base: `/v1`. JSON request/response. Header `Idempotency-Key` on mutating routes.
 | --- | --- | --- |
 | `POST` | `/v1/orders` | Create order (`restaurant_id` or `restaurant_picker` resolved server-side if using seed helpers) |
 | `GET` | `/v1/orders/{id}` | Fetch order + current assignment |
-| `POST` | `/v1/orders/{id}/ready` | Mark ready for assign (kitchen signal) |
+| `POST` | `/v1/orders/{id}/prepare` | `created → preparing` (kitchen start) |
+| `POST` | `/v1/orders/{id}/ready` | `preparing → ready_for_assign` (kitchen signal) |
+| `POST` | `/v1/orders/{id}/pickup` | `assigned → picked_up` |
+| `POST` | `/v1/orders/{id}/deliver` | `picked_up → delivered` |
+| `POST` | `/v1/orders/{id}/cancel` | Customer cancel to `cancelled` from non-terminal states |
 
 ### 9.2 Assignment
 
@@ -657,6 +661,20 @@ Do not start Phase D before Phase B race tests pass.
 | LLM provider | env-driven | agent |
 | Eval scenario_count | 24 | evals |
 
+Frozen for MVP (A0, 2026-09-28):
+
+- Rider capacity is fixed to `1`. One active (`offered`/`accepted`) assignment per rider is enforced by a partial unique index; multi-capacity is out of scope.
+- Worker topology: `api` runs an in-process goroutine pool (`assign.worker_count`); `worker` binary runs the same `assign` package as a standalone expiry/reoffer poller. PostgreSQL is authoritative; Redis `assign:{order_id}` token locks only coordinate attempts.
+- Idempotency: every mutating `/v1/*` route accepts `Idempotency-Key`. Scope is `key + method + path-template + target-id`. Identical request hash replays the first response; different payload with the same key returns `409 IDEMPOTENCY_KEY_REUSED`. Rider webhooks additionally persist in `webhooks_ledger` keyed by `Idempotency-Key`.
+- Kitchen/terminal transitions: `POST /v1/orders/{id}/prepare` (`created → preparing`), `POST /v1/orders/{id}/ready` (`preparing → ready_for_assign`), `POST /v1/orders/{id}/pickup` (`assigned → picked_up`), `POST /v1/orders/{id}/deliver` (`picked_up → delivered`), `POST /v1/orders/{id}/cancel` (customer cancel from `created`/`preparing`/`ready_for_assign`/`offering` to `cancelled`). Rider `cancelled`/`offline` webhooks move `offering`/`assigned` back to `ready_for_assign` and release the rider; they never terminally cancel the order.
+- Reassign commit: supersedes the current active offer atomically (`superseded`) and invalidates late accepts on the old assignment id. `batch_hint`/`delay_explain` commits are informational and return `422 PROPOSAL_NOT_COMMITTABLE` unless the type is `reassign`.
+- Proposal expiry: `proposal_ttl` default `10m`; lazy expiry on read/commit plus a periodic sweeper.
+- Auth: `ADMIN_TOKEN` gates `/admin/*`; `OPS_TOKEN` gates proposal commit/reject; agent credential may read/propose only and must never access `/admin/*`. Empty tokens mean open local mode; when set, mismatches return `401`/`403`.
+- Eval isolation: scenarios run sequentially with `DELETE /admin/reset` between cases unless the runner is told otherwise.
+- Dependencies: Go 1.25, Postgres 16, Redis 7, Python 3.11+, k6 for load. Planner runs deterministically without an LLM key; `OPENAI_API_KEY` only enables optional LLM explanations.
+- Latency definitions: enqueue p95 is HTTP request-start to response; first-offer p95 is accepted enqueue to committed offer row. Both require sample size, warm-up, and machine context in the report.
+- Error codes: `ORDER_STATE_CONFLICT`, `ORDER_NOT_FOUND`, `RIDER_NOT_FOUND`, `RIDER_STATE_CONFLICT`, `ASSIGNMENT_NOT_FOUND`, `ASSIGNMENT_STATE_CONFLICT`, `PROPOSAL_NOT_FOUND`, `PROPOSAL_STATE_CONFLICT`, `PROPOSAL_NOT_COMMITTABLE`, `IDEMPOTENCY_KEY_REUSED`, `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`.
+
 ---
 
 ## 23. Document control
@@ -664,5 +682,6 @@ Do not start Phase D before Phase B race tests pass.
 | Version | Date | Notes |
 | --- | --- | --- |
 | 1.0 | 2026-09-28 | Initial spec for Go orchestrator + planner agent |
+| 1.1 | 2026-09-28 | A0 freeze: capacity=1, worker topology, generic idempotency, kitchen/terminal transitions, proposal TTL, auth matrix, eval isolation, error codes; fix evals suite path |
 
 Changes to public API paths or state machine require a version bump in this section and README.
