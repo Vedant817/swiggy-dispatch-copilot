@@ -77,14 +77,14 @@ Errors look like `{"code":"ORDER_STATE_CONFLICT","message":"...","request_id":".
 
 | Measure | Target | Measured |
 | --- | --- | --- |
-| Assignment create p95 (HTTP, n=50 sequential, Windows, `go run` dev, 10 rest/25 riders) | < 100 ms | 28.9 ms |
-| Assign-call p95 (HTTP, same run) | < 500 ms | 36.8 ms |
+| Assignment create p95 (HTTP, 10-way concurrent, n=67 offered + warm-up 10, Windows, `go run` dev, 10 rest/120 riders) | < 100 ms | 19.0 ms |
+| Assign-call p95 (HTTP, same run, 0 failures, 33 backpressure rejections at fleet capacity) | < 500 ms | 32.2 ms |
 | Generated Go eval suite | ≥ 85% | 24/24 (1.00), 0 double-assigns |
 | Agent trajectory eval | ≥ 85% | 8/8 (1.00), exact tool subset |
 | Go race detector | clean | clean via `make race-docker` (Linux); contention tests green locally |
 | Duplicate webhook side effects | 0 | tested: replay returns original, hash mismatch 409 |
 
-`go test -race` needs a Linux C toolchain — on Windows run `make race-docker`. k6 numbers should be recorded with machine, compose versions, warm-up, and sample size; the table above notes its methodology inline.
+`go test -race` needs a Linux C toolchain — on Windows run `make race-docker`. The k6 script (`load/assign_latency.js`, `make load`) covers the same thresholds; `go/cmd/load` (`go run ./cmd/load --concurrency 10 --count 100`) is the executed runner — report in `load/report.json` with warm-up, samples, failures, and machine context.
 
 ## Demo script
 

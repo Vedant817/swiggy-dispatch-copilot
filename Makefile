@@ -60,5 +60,8 @@ eval-agent:
 load:
 	k6 run --env BASE_URL=http://127.0.0.1:8080 --env VUS=$(VUS) --env DURATION=$(DURATION) load/assign_latency.js
 
+load-go:
+	cd $(GO_DIR) && go run ./cmd/load --base http://127.0.0.1:8080 --concurrency 10 --count 100 --warmup 10 --out ../load/report.json
+
 demo:
 	bash scripts/demo.sh
