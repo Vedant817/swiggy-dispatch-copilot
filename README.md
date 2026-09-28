@@ -1,14 +1,14 @@
 # Swiggy Dispatch Copilot
 
-A local, synthetic dark-kitchen dispatch system designed to demonstrate reliable Go order orchestration alongside an AI-assisted operations planner. The core idea is simple: **the agent suggests; the typed service decides and commits**. This is an independent engineering project, not a connection to Swiggy's production systems.
-
-> **Current status:** Design stage. This repository contains documentation only. The services, infrastructure, CLI, tests, and demo described below are planned and cannot be run yet; no performance or evaluation results have been measured.
+A local, synthetic dark-kitchen dispatch system: a Go service owns order orchestration and assignment correctness, while a Python planner proposes rider reassignments that only the Go service can commit. **The agent suggests; the typed service decides.** This is an independent engineering project with generated data, not a connection to any production food-delivery system.
 
 ## What it does
 
-The envisioned system accepts kitchen orders, finds suitable riders, sends time-limited offers, and handles acceptance, rejection, expiry, and rider cancellation without double-booking. An operations planner inspects live orders and assignment traces, explains delays, and proposes a rider reassignment or batching hint. A separate authorized operator or service-side policy gate decides whether to commit a proposal. The planner never writes assignment state or performs payments.
-
-Synthetic restaurants, riders, order traffic, and evaluation scenarios are generated from configurable seeds. This makes the dispatch flow demonstrable without real customer data and lets concurrency, recovery, and agent behavior be tested repeatedly.
+- Accepts kitchen orders and moves them through `created → preparing → ready_for_assign → offering → assigned → picked_up → delivered` (plus `cancelled`).
+- Offers orders to nearby riders using configurable scoring (distance, load, rating, VIP bonus) with time-limited offers, expiry sweeps, reoffers, and rider-cancel recovery — without double-booking.
+- Lets an operations planner inspect live state, explain delays from assignment traces, and propose a reassignment; an authorized operator confirms, and Go commits it atomically (superseding stale offers).
+- Generates restaurants, riders, traffic, and evaluation scenarios from seeds so demos and tests are reproducible without real customer data.
+- Deduplicates mutating requests with `Idempotency-Key` and inbound rider events with a webhook ledger.
 
 ## Architecture
 
@@ -24,71 +24,96 @@ Ops user ──explicit confirmation──> Go policy gate ──> PostgreSQL
 
 | Component | Responsibility |
 | --- | --- |
-| Go HTTP API | Orders, riders, assignments, webhooks, proposals, ops reads, authentication, and idempotency |
-| Go worker | Candidate scoring, time-limited offers, expiry, reoffers, and cancellation recovery |
-| PostgreSQL | Authoritative orders, assignments, proposal records, deduplication ledgers, and assignment traces |
-| Redis | Short-lived coordination for assignment attempts; database transactions enforce correctness |
-| Go generator | Seeded world creation, order traffic, rider location updates, and burst workloads through HTTP |
-| Python planner | Grounded read/propose tools, structured proposal output, and an operator-confirmed commit flow |
-| Evaluation and load drivers | Generated scenarios, concurrency/race checks, and dispatch latency measurements |
+| Go HTTP API (`go/cmd/api`, `go/internal/api`) | Orders, riders, assignments, webhooks, proposals, ops reads, auth, idempotency |
+| Go worker (`go/cmd/worker`, `go/internal/assign`) | Scoring, time-limited offers, expiry sweeps, reoffers, cancellation recovery |
+| PostgreSQL | Authoritative state: orders, assignments (partial unique indexes prevent double-booking), proposals, dedup ledgers, assignment traces |
+| Redis | Short-lived `assign:{order}` coordination locks; correctness revalidated in Postgres |
+| Go generator (`go/cmd/gen`, `go/internal/gen`) | Seeded world/traffic/burst through public HTTP |
+| Python planner (`agent/app`) | Grounded read/propose tools, local policy checks, operator-confirmed commit |
+| Eval + load (`evals/`, `load/`) | Generated scenarios against live APIs, k6 latency script |
 
-### Assignment lifecycle
+Correctness rules: at most one active assignment per order and per rider (capacity 1, DB-enforced); Redis leases coordinate but never substitute for a commit; offers and retry intent survive worker restarts; proposal creation never mutates assignments.
 
-An order moves through `created → preparing → ready_for_assign → offering → assigned → picked_up → delivered`. While an order is ready, the worker selects nearby available riders, scores candidates by distance, load, rating, and VIP priority, then creates a time-limited offer. A rider's acceptance commits the assignment. On rejection, expiry, or cancellation, the offer is closed, rider capacity is released, and an eligible order returns to the assignment queue. Invalid state transitions return an HTTP `409` with a stable error code.
+## Quickstart
 
-The correctness goals are **at most one active assignment per order** and **no rider capacity oversubscription**. PostgreSQL constraints, conditional updates, and short transactions are intended to enforce these even when requests race or a Redis lease expires. The Redis lock coordinates attempts; it is not a substitute for a database commit. Offers and retry intent must survive worker restarts rather than existing only in memory.
+Prerequisites: Go 1.25, Python 3.11+, Docker with Compose, `curl`, and (for `make load`) k6.
 
-### Proposal boundary
+```bash
+# 1. Start Postgres + Redis, then the API (migrations run on boot)
+docker compose up -d postgres redis
+cd go && go run ./cmd/api        # :8080, worker loop in-process
+# (optional) standalone worker: go run ./cmd/worker
 
-The planner can read an ops snapshot, order details, available riders, and the order's assignment trace. It can create typed `reassign`, `batch_hint`, and `delay_explain` proposals via the Go API. Creating a proposal has no assignment side effect. A commit requires explicit confirmation or an authorized policy decision; the Go service then rechecks current order and rider state before making any change. Stale offers, unavailable riders, invented IDs, and conflicting concurrent operations are rejected server-side.
+# 2. Seed a world and send traffic
+go run ./cmd/gen world  --config ../configs/default.yaml
+go run ./cmd/gen traffic --config ../configs/default.yaml --duration 60s
 
-### Idempotency and visibility
+# 3. Plan a reassignment (needs an offering order id)
+cd ../agent && python -m app.main --goal "reassign stalled VIP order" --order <ORDER_ID> --auto-confirm
 
-Mutating HTTP operations use an `Idempotency-Key`, and inbound rider events are recorded in a webhook ledger so a duplicate can return the original result without a second side effect. Request IDs connect structured API logs, worker events, assignment traces, and planner tool calls. A local admin token gates synthetic seeding and reset operations; an agent credential should not grant admin or commit privileges.
+# 4. Verify
+make test        # Go unit + integration (serial, needs DB)
+make race        # go test -race (Linux toolchain; on Windows use: make race-docker)
+make eval        # 24 generated scenarios + 8 agent trajectories
+```
 
-## Planned HTTP surface
+Admin routes (`/admin/seed/world`, `/admin/reset`) are local-only and disabled when `APP_ENV=prod`. Set `ADMIN_TOKEN`/`OPS_TOKEN` to enforce; empty means open local mode. The agent credential reads/proposes only and never touches admin routes.
 
-All application endpoints use JSON. The principal routes are:
+## HTTP surface
+
+JSON everywhere; `X-Request-Id` echoed; mutating routes accept `Idempotency-Key`.
 
 | Area | Routes |
 | --- | --- |
-| Orders | `POST /v1/orders`, `GET /v1/orders/{id}`, `POST /v1/orders/{id}/ready` |
-| Dispatch | `POST /v1/orders/{id}/assign`, `GET /v1/assignments/{id}`, `POST /v1/assignments/{id}/accept`, `POST /v1/assignments/{id}/reject` |
-| Riders and events | `GET /v1/riders`, `POST /v1/riders/{id}/location`, `POST /v1/webhooks/rider` |
-| Planner and ops | `GET /v1/ops/snapshot`, `GET /v1/orders/{id}/trace`, `POST /v1/proposals`, `GET /v1/proposals/{id}`, `POST /v1/proposals/{id}/commit`, `POST /v1/proposals/{id}/reject` |
-| Local administration | `POST /admin/seed/world`, `DELETE /admin/reset` (local/test environments only) |
+| Orders | `POST /v1/orders`, `GET /v1/orders/{id}`, `POST /v1/orders/{id}/{prepare,ready,pickup,deliver,cancel}` |
+| Dispatch | `POST /v1/orders/{id}/assign`, `GET /v1/assignments/{id}`, `POST /v1/assignments/{id}/{accept,reject}` |
+| Riders/events | `GET /v1/riders`, `GET /v1/restaurants`, `POST /v1/riders/{id}/location`, `POST /v1/webhooks/rider` |
+| Planner/ops | `GET /v1/ops/snapshot`, `GET /v1/orders/{id}/trace`, `POST /v1/proposals`, `GET /v1/proposals/{id}`, `POST /v1/proposals/{id}/{commit,reject}` |
+| Local admin | `POST /admin/seed/world`, `DELETE /admin/reset` |
 
-Mutating requests will accept `Idempotency-Key`; `X-Request-Id` will be echoed for tracing. Errors will use a stable JSON shape, for example `{"code":"ORDER_STATE_CONFLICT","message":"...","request_id":"..."}`. Some kitchen and terminal-state transitions still require a finalized event/API contract before implementation.
+Errors look like `{"code":"ORDER_STATE_CONFLICT","message":"...","request_id":"..."}` with stable codes (`ORDER/RIDER/ASSIGNMENT/PROPOSAL_*`, `IDEMPOTENCY_KEY_REUSED`, `VALIDATION_ERROR`, …).
 
-## Technology and repository layout
+## Verification and metrics
 
-- **Go** for the HTTP service, dispatch worker, deterministic generator, domain logic, and race/integration tests.
-- **PostgreSQL** for transactional state and durable deduplication; **Redis** for bounded coordination and offer-related ephemeral data.
-- **Python** for a tool-calling planner (LangGraph or Agents SDK) and scenario evaluation.
-- **Docker Compose** for a local Postgres/Redis/API/worker stack; **Make** for development, test, eval, and load commands.
-
-The planned layout places Go code in `go/cmd/` and `go/internal/`, planner code in `agent/app/`, configuration in `configs/`, generated-scenario tooling in `evals/`, load scripts in `load/`, and local demo scripts in `scripts/`. None of those directories has been scaffolded yet.
-
-## Reproducibility, verification, and performance
-
-Generators will build restaurants, riders, locations, and order streams from a seed and config; test scenarios will describe **predicates and actions**, then resolve IDs from live API responses rather than embedding fixed UUIDs. Integration tests will use PostgreSQL and Redis to prove a full offer-to-accept path and cancellation recovery. `go test -race` will cover executed in-process concurrency paths, while multi-process database tests will check the double-assignment invariants. Generated evaluation cases will assert proposal validity, tool usage, no invented IDs, and recovery outcomes.
-
-The intended local targets are:
-
-| Measure | Target | Measured result |
+| Measure | Target | Measured |
 | --- | --- | --- |
-| Assignment enqueue p95 | < 100 ms | Not measured |
-| Time to first offer p95 | < 500 ms | Not measured |
-| Duplicate webhook side effects | 0 | Not tested |
-| Double assignments / invented agent IDs | 0 / 0 | Not tested |
-| Generated eval suite pass rate | ≥ 85% | Not run |
-| Go race detector | Clean | Not run |
+| Assignment create p95 (HTTP, n=50 sequential, Windows, `go run` dev, 10 rest/25 riders) | < 100 ms | 28.9 ms |
+| Assign-call p95 (HTTP, same run) | < 500 ms | 36.8 ms |
+| Generated Go eval suite | ≥ 85% | 24/24 (1.00), 0 double-assigns |
+| Agent trajectory eval | ≥ 85% | 8/8 (1.00), exact tool subset |
+| Go race detector | clean | clean via `make race-docker` (Linux); contention tests green locally |
+| Duplicate webhook side effects | 0 | tested: replay returns original, hash mismatch 409 |
 
-Once implemented, the intended local flow is to boot the stack with `docker compose up`, generate a world and traffic with `make gen-world gen-traffic`, inspect dispatch and proposals, then run `make race`, `make eval`, and `make load`. A scripted demo will show a rider cancellation, a planner proposal, operator confirmation, and a committed reassignment. `make stop` will stop the stack. These commands are **not yet available**.
+`go test -race` needs a Linux C toolchain — on Windows run `make race-docker`. k6 numbers should be recorded with machine, compose versions, warm-up, and sample size; the table above notes its methodology inline.
+
+## Demo script
+
+`scripts/demo.sh` runs the interview story end-to-end (reset → seed → VIP order → offer → snapshot → rider cancel → agent propose/commit → assigned → latest eval summary). It needs `bash`, `curl`, and the agent deps on `PATH`:
+
+```bash
+BASE_URL=http://127.0.0.1:8080 bash scripts/demo.sh
+```
+
+`scripts/seed_and_run.sh` boots infra and seeds the default world.
 
 ## Design trade-offs
 
-- **Greedy assignment versus latency:** score nearby candidates using configurable weights and a bounded candidate pool; avoid a global optimization service in the first version.
-- **Safety versus coordination speed:** rely on PostgreSQL to prevent conflicting writes; use Redis leases only to reduce redundant work.
-- **Agent usefulness versus authority:** allow the planner to explain and propose, but keep policy checks and state mutation in the Go service.
-- **Reproducibility versus realism:** simulate traffic from seeds rather than using production data; report actual local hardware, load parameters, and sample sizes alongside any future latency claims.
+- Greedy scoring with a bounded candidate pool instead of global optimization — latency over optimality, weights in config.
+- Postgres as the correctness boundary, Redis as coordination — safety over lock speed.
+- Planner proposes, service commits — usefulness without authority.
+- Seeded simulation over production data — reproducibility over realism.
+
+## Talk track
+
+1. The planner suggests; only Go commits assignment bytes, under lock and constraints.
+2. `Idempotency-Key` plus the webhook ledger makes duplicate rider events safe.
+3. `go test -race` plus transactional contention tests protect the double-book invariants.
+4. Eval scenarios are generated from seeds and frozen before comparing policy or prompt changes.
+5. A mid-offer rider cancel returns the order to the queue and reoffers — never stuck in `offering`.
+6. Greedy score vs latency is explicit: weights and offer windows live in config, not folklore.
+
+## Limits
+
+- Single-capacity riders, one metro bounding box, bbox (not GEO) candidate search in MVP.
+- No real payments, auth is local shared tokens, admin routes are test-only.
+- Agent heuristic picks the first available non-current rider (grounded, not optimal); LLM narration is optional and never authoritative.
