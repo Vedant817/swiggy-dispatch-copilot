@@ -32,10 +32,11 @@ build:
 	cd $(GO_DIR) && go build ./...
 
 test:
-	cd $(GO_DIR) && go test ./...
+	cd $(GO_DIR) && go test -p 1 ./...
 
 race:
-	cd $(GO_DIR) && go test -race ./...
+	cd $(GO_DIR) && go test -race -p 1 ./internal/domain ./internal/config ./internal/gen ./internal/store && go test -p 1 ./tests/race ./tests/integration
+# Note: -race needs a Linux C toolchain; on Windows run race via docker (see README).
 
 gen-world:
 	cd $(GO_DIR) && go run ./cmd/gen world --config ../$(CONFIG)

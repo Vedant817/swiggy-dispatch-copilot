@@ -27,7 +27,9 @@ func testServer(t *testing.T) (*api.Server, *store.Store) {
 		t.Skip("DATABASE_URL not set")
 	}
 	os.Setenv("DATABASE_URL", dsn)
-	os.Setenv("REDIS_ADDR", "127.0.0.1:6379")
+	if os.Getenv("REDIS_ADDR") == "" {
+		os.Setenv("REDIS_ADDR", "127.0.0.1:6379")
+	}
 	cfg, err := config.Load("../../../configs/default.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +45,7 @@ func testServer(t *testing.T) (*api.Server, *store.Store) {
 	if err := st.Reset(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rdb, _ := redisx.Dial("127.0.0.1:6379")
+	rdb, _ := redisx.Dial(os.Getenv("REDIS_ADDR"))
 	srv := api.New(cfg, st, rdb)
 	return srv, st
 }
