@@ -33,6 +33,9 @@ func TestProductionRoleBoundaries(t *testing.T) {
 	}
 	for _, tc := range cases {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
+		if tc.method == http.MethodPost {
+			r.Header.Set("Idempotency-Key", "unique-test-key")
+		}
 		if tc.header != "" {
 			r.Header.Set(tc.header, tc.value)
 		}
@@ -40,5 +43,11 @@ func TestProductionRoleBoundaries(t *testing.T) {
 		if got := s.authorizeV1(w, r); got != tc.want {
 			t.Errorf("%s %s role %s: allowed=%v, want %v (%s)", tc.method, tc.path, tc.header, got, tc.want, w.Body.String())
 		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/orders", nil)
+	r.Header.Set("X-Service-Token", strings.Repeat("s", 24))
+	w := httptest.NewRecorder()
+	if s.authorizeV1(w, r) || w.Code != http.StatusBadRequest {
+		t.Fatalf("missing production idempotency key: status=%d", w.Code)
 	}
 }

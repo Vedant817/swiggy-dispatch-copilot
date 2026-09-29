@@ -57,7 +57,17 @@ make race        # go test -race (Linux toolchain; on Windows use: make race-doc
 make eval        # 24 generated scenarios + 8 agent trajectories
 ```
 
+Go tests that create/reset data require an explicit **disposable** `TEST_DATABASE_URL`; they skip if it is missing or `APP_ENV=prod`. `make race-docker` supplies one for its local Compose database. Never point this variable at a production database.
+
 Admin routes (`/admin/seed/world`, `/admin/reset`) are local-only and disabled when `APP_ENV=prod`. Set `ADMIN_TOKEN`/`OPS_TOKEN` to enforce; empty means open local mode. The agent credential reads/proposes only and never touches admin routes.
+
+### Production-mode boundary
+
+`APP_ENV=prod` makes the API fail startup unless five distinct secrets of at least 24 characters are present: `SERVICE_TOKEN`, `AGENT_TOKEN`, `OPS_TOKEN`, `WEBHOOK_TOKEN`, and `ADMIN_TOKEN`. Supply them through your deployment's secret manager; the background worker only needs database/Redis credentials. Production requests use `X-Service-Token` for ordinary API writes, `X-Agent-Token` for reads/proposals, `X-Ops-Token` for commit/reject and `/metrics`, and `X-Webhook-Token` for rider events. Every production `POST /v1/*` needs an `Idempotency-Key`. Production rider events must include `assignment_id` so a delayed event cannot be mistaken for a replacement offer. The agent image is an optional CLI (`docker compose --profile agent run --rm agent`).
+
+This mode is an authentication and consistency boundary, **not** an internet-ready deployment: terminate TLS at a trusted ingress, supply a restricted database account with backups/PITR, enforce network isolation and rate limits, and rotate credentials before exposing it publicly. The Compose defaults are for local development only.
+
+For a disposable Postgres container, `scripts/backup_drill.ps1 -Container <container-name>` exports a real `pg_dump` artifact out of the container, reimports and restores it into a throwaway database, and verifies eight domain tables. Add `-Quiesced` to compare source/restore counts **only after writers are stopped**; a live source can change after the dump snapshot. This is a **restore drill**, not an off-host retained backup or point-in-time recovery solution. Configure those with your production database operator. Schema migrations are transactionally serialized and checksummed; existing records from an ID-only migration table are pinned on first upgrade.
 
 ## HTTP surface
 
@@ -116,4 +126,5 @@ BASE_URL=http://127.0.0.1:8080 bash scripts/demo.sh
 
 - Single-capacity riders, one metro bounding box, bbox (not GEO) candidate search in MVP.
 - No real payments, auth is local shared tokens, admin routes are test-only.
+- No managed TLS ingress, credential rotation, off-host backup retention/PITR, multi-region failover, or production incident runbook is supplied in this repository. The local restore drill, Docker checks and GitHub Actions evidence do not prove a hosted rollout.
 - Agent heuristic picks the first available non-current rider (grounded, not optimal); LLM narration is optional and never authoritative.

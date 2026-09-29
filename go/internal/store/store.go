@@ -67,10 +67,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 		checksum := fmt.Sprintf("%x", sha256.Sum256(b))
-		var stored string
+		var stored *string
 		err = tx.QueryRow(ctx, `SELECT checksum FROM _migrations WHERE id=$1`, n).Scan(&stored)
 		if err == nil {
-			if stored != checksum {
+			if stored == nil {
+				// Older releases recorded only the migration ID. Trust that
+				// applied version once, then pin its checksum for future boots.
+				if _, err := tx.Exec(ctx, `UPDATE _migrations SET checksum=$2 WHERE id=$1 AND checksum IS NULL`, n, checksum); err != nil {
+					return err
+				}
+			} else if *stored != checksum {
 				return fmt.Errorf("migration %s checksum changed after application", n)
 			}
 			continue

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/Vedant817/swiggy-dispatch-copilot/go/internal/domain"
 	"github.com/google/uuid"
@@ -49,6 +50,10 @@ func (s *Server) handleRiderWebhook(w http.ResponseWriter, r *http.Request) {
 		etype = "rider.offline"
 	} else {
 		fail(w, r, 400, "VALIDATION_ERROR", "event_type must be cancelled|rider.cancelled|offline|rider.offline")
+		return
+	}
+	if strings.EqualFold(s.Cfg.AppEnv(), "prod") && req.AssignmentID == nil {
+		fail(w, r, 400, "VALIDATION_ERROR", "assignment_id required for production rider events")
 		return
 	}
 	// Hash normalized event so aliases replay.
@@ -224,12 +229,9 @@ func (s *Server) handleRiderWebhook(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-		} else if req.RiderID != nil && etype == "rider.offline" {
-			if err := exec(`UPDATE riders SET status=$1,updated_at=now() WHERE id=$2`, domain.RiderOffline, *req.RiderID); err != nil {
-				fail(w, r, 500, "INTERNAL", "offline failed")
-				return
-			}
-			riderID = req.RiderID
+		} else if req.RiderID != nil {
+			fail(w, r, 409, "RIDER_STATE_CONFLICT", "order has no active assignment for this rider")
+			return
 		}
 		if err := exec(`UPDATE orders SET status=$1,updated_at=now() WHERE id=$2 AND status IN ('offering','assigned')`, domain.OrderReady, oid); err != nil {
 			fail(w, r, 500, "INTERNAL", "requeue failed")

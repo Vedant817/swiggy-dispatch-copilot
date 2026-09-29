@@ -675,6 +675,14 @@ Frozen for MVP (A0, 2026-09-28):
 - Latency definitions: enqueue p95 is HTTP request-start to response; first-offer p95 is accepted enqueue to committed offer row. Both require sample size, warm-up, and machine context in the report.
 - Error codes: `ORDER_STATE_CONFLICT`, `ORDER_NOT_FOUND`, `RIDER_NOT_FOUND`, `RIDER_STATE_CONFLICT`, `ASSIGNMENT_NOT_FOUND`, `ASSIGNMENT_STATE_CONFLICT`, `PROPOSAL_NOT_FOUND`, `PROPOSAL_STATE_CONFLICT`, `PROPOSAL_NOT_COMMITTABLE`, `IDEMPOTENCY_KEY_REUSED`, `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`.
 
+Production-mode contract (v1.2):
+
+- The API refuses to start when `APP_ENV=prod` unless `SERVICE_TOKEN`, `AGENT_TOKEN`, `OPS_TOKEN`, `WEBHOOK_TOKEN`, and `ADMIN_TOKEN` are distinct and each contains at least 24 characters. The worker does not receive HTTP role credentials. Admin routes remain disabled in production regardless of token.
+- `X-Service-Token` authorizes ordinary `/v1` writes and reads, `X-Agent-Token` authorizes reads and proposal creation only, `X-Ops-Token` authorizes proposal commit/reject and reads, and `X-Webhook-Token` authorizes rider webhooks. `GET /metrics` needs the ops token in production. All production `POST /v1/*` calls require `Idempotency-Key`.
+- Production rider webhooks must identify `assignment_id`; order-only/rider-only events cannot safely distinguish a delayed signal from a replacement assignment. Local synthetic webhooks may continue using `order_id` for the demo.
+- Customer cancellation of an offered/accepted order closes the assignment and releases its rider in the same PostgreSQL transaction as the order transition, trace event, and idempotent response. Order creation similarly commits order, event, and cached response atomically. Other mutation paths retain an in-progress claim with a bounded stale-claim cleanup policy; they are not yet proven crash-atomic.
+- Migration boot is serialized by a PostgreSQL transaction advisory lock and records per-file checksums. Historical migration records without a checksum are pinned once at upgrade. The migration workflow is forward-only; rollback requires a database snapshot/restore drill.
+
 ---
 
 ## 23. Document control
@@ -683,5 +691,6 @@ Frozen for MVP (A0, 2026-09-28):
 | --- | --- | --- |
 | 1.0 | 2026-09-28 | Initial spec for Go orchestrator + planner agent |
 | 1.1 | 2026-09-28 | A0 freeze: capacity=1, worker topology, generic idempotency, kitchen/terminal transitions, proposal TTL, auth matrix, eval isolation, error codes; fix evals suite path |
+| 1.2 | 2026-09-29 | Production-mode role auth and scoped webhook identity; transactional customer cancel/order create; serialized versioned migrations |
 
 Changes to public API paths or state machine require a version bump in this section and README.

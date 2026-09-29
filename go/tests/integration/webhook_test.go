@@ -104,3 +104,22 @@ func TestStaleOfflineEventCannotDisableNewAssignment(t *testing.T) {
 		t.Fatalf("mismatched rider: %d; want 400", code)
 	}
 }
+
+func TestProductionWebhookRejectsUnscopedEvents(t *testing.T) {
+	srv, _ := testServer(t)
+	t.Setenv("APP_ENV", "prod")
+	t.Setenv("WEBHOOK_TOKEN", "webhook-test-credential-at-least-24")
+	for _, payload := range []map[string]any{
+		{"event_type": "offline", "rider_id": uuid.NewString()},
+		{"event_type": "offline", "order_id": uuid.NewString()},
+		{"event_type": "cancelled", "order_id": uuid.NewString()},
+	} {
+		code, response := doReq(t, srv, "POST", "/v1/webhooks/rider", payload, map[string]string{
+			"Idempotency-Key": uuid.NewString(),
+			"X-Webhook-Token":  "webhook-test-credential-at-least-24",
+		})
+		if code != 400 || response["code"] != "VALIDATION_ERROR" {
+			t.Fatalf("unscoped production event: %d %v", code, response)
+		}
+	}
+}

@@ -47,8 +47,17 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "restaurant_id required")
 		return
 	}
-	owned, hash := s.beginIdem(w, r, "POST /v1/orders", "", body)
-	if !owned {
+	key := r.Header.Get("Idempotency-Key")
+	prior, replayed, err := s.Store.LoadOrderReplay(r.Context(), key, body)
+	if err != nil {
+		if !mapStoreError(w, r, err) {
+			writeError(w, r, 500, "INTERNAL", "order replay failed")
+		}
+		return
+	}
+	if replayed {
+		s.Counters.Inc("idempotency_replays")
+		writeJSON(w, 201, map[string]any{"order": prior})
 		return
 	}
 	restaurantID := req.RestaurantID
@@ -61,27 +70,22 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 			q = `SELECT id FROM restaurants ORDER BY random() LIMIT 1`
 		}
 		if err := s.Store.Pool.QueryRow(r.Context(), q).Scan(&picked); err != nil {
-			s.abortIdem(r, "POST /v1/orders", "")
 			writeError(w, r, 409, "VALIDATION_ERROR", "no restaurants seeded")
 			return
 		}
 		restaurantID = &picked
 	}
-	var key *string
-	if k := r.Header.Get("Idempotency-Key"); k != "" {
-		key = &k
-	}
-	o, err := s.Store.CreateOrder(r.Context(), *restaurantID, priority, time.Now().Add(45*time.Minute), key)
+	o, replayed, err := s.Store.CreateOrderIdempotent(r.Context(), *restaurantID, priority, time.Now().Add(45*time.Minute), key, body)
 	if err != nil {
-		s.abortIdem(r, "POST /v1/orders", "")
 		if !mapStoreError(w, r, err) {
 			writeError(w, r, 500, "INTERNAL", "create order failed")
 		}
 		return
 	}
-	_ = s.Store.AppendEvent(r.Context(), nil, o.ID, nil, nil, "order_created", map[string]any{"priority": priority})
+	if replayed {
+		s.Counters.Inc("idempotency_replays")
+	}
 	resp := map[string]any{"order": o}
-	s.endIdem(r, "POST /v1/orders", "", hash, 201, resp)
 	writeJSON(w, 201, resp)
 }
 

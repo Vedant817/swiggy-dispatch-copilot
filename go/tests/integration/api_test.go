@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,11 +21,8 @@ import (
 func testServer(t *testing.T) (*api.Server, *store.Store) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+	if dsn == "" || os.Getenv("APP_ENV") == "prod" {
+		t.Skip("isolated TEST_DATABASE_URL required; destructive tests never run in prod")
 	}
 	os.Setenv("DATABASE_URL", dsn)
 	if os.Getenv("REDIS_ADDR") == "" {
@@ -128,4 +126,79 @@ func TestOrderLifecycleAndIdempotency(t *testing.T) {
 		t.Fatalf("illegal transition should be 409, got %d", c)
 	}
 	_ = time.Now
+}
+
+func TestFailedCreateLeavesNoClaimOrOrder(t *testing.T) {
+	srv, st := testServer(t)
+	rest, err := st.CreateRestaurant(context.Background(), "retry-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := uuid.NewString()
+	code, _ := doReq(t, srv, "POST", "/v1/orders", map[string]any{"restaurant_id": uuid.NewString()}, map[string]string{"Idempotency-Key": key})
+	if code < 400 {
+		t.Fatalf("missing restaurant unexpectedly succeeded: %d", code)
+	}
+	code, result := doReq(t, srv, "POST", "/v1/orders", map[string]any{"restaurant_id": rest.ID.String()}, map[string]string{"Idempotency-Key": key})
+	if code != 201 {
+		t.Fatalf("key unusable after failed create: %d %v", code, result)
+	}
+	code, again := doReq(t, srv, "POST", "/v1/orders", map[string]any{"restaurant_id": rest.ID.String()}, map[string]string{"Idempotency-Key": key})
+	if code != 201 || again["order"].(map[string]any)["id"] != result["order"].(map[string]any)["id"] {
+		t.Fatalf("atomic create replay failed: %d %v", code, again)
+	}
+}
+
+func TestConcurrentIdenticalOrderKeyCreatesOneOrder(t *testing.T) {
+	srv, st := testServer(t)
+	rest, err := st.CreateRestaurant(context.Background(), "concurrent-key-kitchen", 12.95, 77.6, 12, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := uuid.NewString()
+	ids := make([]string, 8)
+	codes := make([]int, 8)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var result map[string]any
+			codes[i], result = doReq(t, srv, "POST", "/v1/orders", map[string]any{"restaurant_id": rest.ID.String()}, map[string]string{"Idempotency-Key": key})
+			if order, ok := result["order"].(map[string]any); ok {
+				ids[i], _ = order["id"].(string)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range ids {
+		if codes[i] != 201 || ids[i] == "" || ids[i] != ids[0] {
+			t.Fatalf("request %d got status=%d id=%s; first id=%s", i, codes[i], ids[i], ids[0])
+		}
+	}
+	var count int
+	if err := st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM orders WHERE idempotency_key=$1`, key).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("orders for key=%d %v", count, err)
+	}
+}
+
+func TestPickerReplayDoesNotResolveAgain(t *testing.T) {
+	srv, st := testServer(t)
+	for i := 0; i < 4; i++ {
+		if _, err := st.CreateRestaurant(context.Background(), fmt.Sprintf("picker-%d", i), 12.95, 77.6, 12, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := uuid.NewString()
+	request := map[string]any{"restaurant_picker": "random", "priority": "vip"}
+	code, first := doReq(t, srv, "POST", "/v1/orders", request, map[string]string{"Idempotency-Key": key})
+	if code != 201 {
+		t.Fatalf("first request %d: %v", code, first)
+	}
+	for i := 0; i < 8; i++ {
+		code, next := doReq(t, srv, "POST", "/v1/orders", request, map[string]string{"Idempotency-Key": key})
+		if code != 201 || next["order"].(map[string]any)["id"] != first["order"].(map[string]any)["id"] {
+			t.Fatalf("picker retry %d returned %d: %v", i, code, next)
+		}
+	}
 }

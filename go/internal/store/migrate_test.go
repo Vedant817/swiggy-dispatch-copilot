@@ -3,21 +3,20 @@ package store
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+	if dsn == "" || os.Getenv("APP_ENV") == "prod" {
+		t.Skip("isolated TEST_DATABASE_URL required; destructive tests never run in prod")
 	}
 	return dsn
 }
@@ -55,6 +54,70 @@ func TestConcurrentMigrationsRecordChecksums(t *testing.T) {
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM _migrations WHERE checksum IS NOT NULL`).Scan(&applied); err != nil || applied != 4 {
 		t.Fatalf("applied migrations: %d %v", applied, err)
 	}
+}
+
+func TestLegacyMigrationWithoutChecksumIsUpgraded(t *testing.T) {
+	ctx := context.Background()
+	st, err := Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE _migrations SET checksum=NULL WHERE id='001_init.sql'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("upgrade legacy row: %v", err)
+	}
+	var checksum *string
+	if err := st.Pool.QueryRow(ctx, `SELECT checksum FROM _migrations WHERE id='001_init.sql'`).Scan(&checksum); err != nil || checksum == nil || *checksum == "" {
+		t.Fatalf("checksum missing after upgrade: %v %v", checksum, err)
+	}
+}
+
+func TestLegacyMigrationTableWithoutChecksumColumn(t *testing.T) {
+	ctx := context.Background()
+	admin, err := Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	database := "dispatch_legacy_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if _, err := admin.Pool.Exec(ctx, `CREATE DATABASE `+database); err != nil {
+		t.Skipf("database creation unavailable for isolated legacy drill: %v", err)
+	}
+	defer func() {
+		if _, err := admin.Pool.Exec(ctx, `DROP DATABASE `+database); err != nil {
+			t.Errorf("legacy drill cleanup: %v", err)
+		}
+	}()
+	config, err := pgxpool.ParseConfig(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.Database = database
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := &Store{Pool: pool}
+	if _, err := pool.Exec(ctx, `CREATE TABLE _migrations(id TEXT PRIMARY KEY); INSERT INTO _migrations(id) VALUES('001_init.sql')`); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Migrate(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("legacy table migration: %v", err)
+	}
+	var applied int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM _migrations WHERE checksum IS NOT NULL`).Scan(&applied); err != nil || applied != 4 {
+		pool.Close()
+		t.Fatalf("upgraded checksums: %d %v", applied, err)
+	}
+	pool.Close()
 }
 
 func TestMigrateAndConstraints(t *testing.T) {

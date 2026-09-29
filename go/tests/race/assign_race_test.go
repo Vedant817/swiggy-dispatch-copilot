@@ -16,11 +16,8 @@ import (
 func testSetup(t *testing.T) (*api.Server, *store.Store) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+	if dsn == "" || os.Getenv("APP_ENV") == "prod" {
+		t.Skip("isolated TEST_DATABASE_URL required; destructive tests never run in prod")
 	}
 	os.Setenv("DATABASE_URL", dsn)
 	if os.Getenv("REDIS_ADDR") == "" {

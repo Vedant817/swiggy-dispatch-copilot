@@ -139,25 +139,32 @@ func (s *Server) authorizeV1(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	path := r.URL.Path
+	allowed := false
 	if strings.HasSuffix(path, "/commit") || (strings.HasPrefix(path, "/v1/proposals/") && strings.HasSuffix(path, "/reject")) {
-		return s.requireOps(w, r)
-	}
-	if path == "/v1/webhooks/rider" {
-		if matchesToken(r.Header.Get("X-Webhook-Token"), os.Getenv("WEBHOOK_TOKEN")) {
-			return true
+		if !s.requireOps(w, r) {
+			return false
 		}
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "webhook token required")
+		allowed = true
+	} else if path == "/v1/webhooks/rider" {
+		if !matchesToken(r.Header.Get("X-Webhook-Token"), os.Getenv("WEBHOOK_TOKEN")) {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "webhook token required")
+			return false
+		}
+		allowed = true
+	} else if r.Method == http.MethodGet || (path == "/v1/proposals" && r.Method == http.MethodPost) {
+		allowed = matchesToken(r.Header.Get("X-Agent-Token"), os.Getenv("AGENT_TOKEN")) ||
+			matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN")) ||
+			matchesToken(r.Header.Get("X-Ops-Token"), os.Getenv("OPS_TOKEN"))
+	} else {
+		allowed = matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN"))
+	}
+	if !allowed {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "insufficient role for API operation")
 		return false
 	}
-	if r.Method == http.MethodGet || (path == "/v1/proposals" && r.Method == http.MethodPost) {
-		if matchesToken(r.Header.Get("X-Agent-Token"), os.Getenv("AGENT_TOKEN")) ||
-			matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN")) ||
-			matchesToken(r.Header.Get("X-Ops-Token"), os.Getenv("OPS_TOKEN")) {
-			return true
-		}
-	} else if matchesToken(r.Header.Get("X-Service-Token"), os.Getenv("SERVICE_TOKEN")) {
-		return true
+	if r.Method == http.MethodPost && r.Header.Get("Idempotency-Key") == "" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Idempotency-Key required in production")
+		return false
 	}
-	writeError(w, r, http.StatusForbidden, "FORBIDDEN", "insufficient role for API operation")
-	return false
+	return true
 }
