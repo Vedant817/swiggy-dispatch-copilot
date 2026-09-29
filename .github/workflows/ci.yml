@@ -46,10 +46,20 @@ jobs:
         run: |
           pip install pyyaml httpx pydantic
           python evals/generate_suite.py --config configs/eval.yaml
-          (cd go && go run ./cmd/api & echo $! > /tmp/api.pid)
-          sleep 8
+          git diff --exit-code -- evals/suites
+          (cd go && go build -o /tmp/dispatch-api ./cmd/api)
+          CONFIG_PATH=./configs/default.yaml /tmp/dispatch-api >/tmp/dispatch-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then break; fi
+            if [ "$i" -eq 30 ]; then cat /tmp/dispatch-api.log; exit 1; fi
+            sleep 1
+          done
           python evals/runners/go_scenarios.py --config configs/eval.yaml
-          kill $(cat /tmp/api.pid)
+          python evals/runners/agent_scenarios.py --config configs/eval.yaml
+      - name: container images build
+        run: docker compose build api worker agent
 
   agent:
     runs-on: ubuntu-latest
@@ -62,3 +72,44 @@ jobs:
         run: |
           pip install httpx pydantic pyyaml pytest
           cd agent && python -m pytest tests -q
+
+  production-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run built images with production authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          export APP_ENV=local
+          export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          for role in SERVICE AGENT OPS WEBHOOK ADMIN; do
+            export "${role}_TOKEN=$(openssl rand -hex 24)"
+          done
+          trap 'docker compose down -v' EXIT
+          docker compose --profile agent build
+          docker compose up -d postgres redis api worker
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then break; fi
+            if [ "$i" -eq 45 ]; then docker compose logs api worker; exit 1; fi
+            sleep 2
+          done
+          curl -fsS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"seed":42,"restaurants":5,"riders":15}' http://127.0.0.1:8080/admin/seed/world >/dev/null
+          export APP_ENV=prod
+          docker compose up -d --force-recreate api worker
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then break; fi
+            if [ "$i" -eq 45 ]; then docker compose logs api worker; exit 1; fi
+            sleep 2
+          done
+          status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(status http://127.0.0.1:8080/v1/ops/snapshot)" = 403
+          test "$(status -H "X-Agent-Token: $AGENT_TOKEN" http://127.0.0.1:8080/v1/ops/snapshot)" = 200
+          test "$(status -X POST -H "X-Agent-Token: $AGENT_TOKEN" -H 'Idempotency-Key: test-agent' http://127.0.0.1:8080/v1/orders)" = 403
+          test "$(status -X POST -H "X-Service-Token: $SERVICE_TOKEN" http://127.0.0.1:8080/v1/orders)" = 400
+          bad_order="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          test "$(status -X POST -H "X-Webhook-Token: $WEBHOOK_TOKEN" -H 'Idempotency-Key: test-webhook' -H 'Content-Type: application/json' -d "{\"event_type\":\"cancelled\",\"order_id\":\"$bad_order\"}" http://127.0.0.1:8080/v1/webhooks/rider)" = 400
+          test "$(status -H "X-Ops-Token: $OPS_TOKEN" http://127.0.0.1:8080/metrics)" = 200
+          test "$(status -X POST -H "X-Admin-Token: $ADMIN_TOKEN" http://127.0.0.1:8080/admin/seed/world)" = 403
+          docker compose --profile agent run --rm agent python -c 'from app.tools import DispatchClient; assert DispatchClient("http://api:8080").get_ops_snapshot()["open_orders"] == 0'
+          python3 scripts/prod_smoke.py
