@@ -1,8 +1,8 @@
 # Swiggy Dispatch Copilot
 
-**Working title:** Dark-kitchen order orchestrator (Go) + assignment planner agent (AI)
+**System:** Dark-kitchen order orchestrator (Go) + assignment planner agent (AI)
 
-**Audience:** Humans and coding agents implementing this repo. Treat this document as the source of truth for scope, architecture, contracts, and acceptance criteria. If code and this doc disagree, update the doc in the same change.
+**Audience:** Engineers maintaining this repo. Treat this document as the source of truth for scope, architecture, contracts, and acceptance criteria. If code and this doc disagree, update the doc in the same change.
 
 **Role fit:** Demonstrates Golang backend ownership (assignment correctness, concurrency, idempotency, SLOs) and production-shaped AI (tool-calling planner that proposes; typed Go service that decides and commits).
 
@@ -10,7 +10,7 @@
 
 ## 1. Product intent
 
-Build a local, runnable system that:
+The local, runnable system:
 
 1. Accepts food / dark-kitchen orders.
 2. Assigns riders under concurrency, timeouts, and cancellation.
@@ -414,7 +414,7 @@ Weights from config. Persist score breakdown JSON on the assignment for traces a
 
 ---
 
-## 11. Agent specification
+## 11. Agent contracts
 
 ### 11.1 Role
 
@@ -671,7 +671,7 @@ Frozen for MVP (A0, 2026-09-28):
 - Proposal expiry: `proposal_ttl` default `10m`; lazy expiry on read/commit plus a periodic sweeper.
 - Auth: `ADMIN_TOKEN` gates `/admin/*`; `OPS_TOKEN` gates proposal commit/reject; agent credential may read/propose only and must never access `/admin/*`. Empty tokens mean open local mode; when set, mismatches return `401`/`403`.
 - Eval isolation: scenarios run sequentially with `DELETE /admin/reset` between cases unless the runner is told otherwise.
-- Dependencies: Go 1.25, Postgres 16, Redis 7, Python 3.11+, k6 for load. Planner runs deterministically without an LLM key; `OPENAI_API_KEY` only enables optional LLM explanations.
+- Dependencies: Go 1.25, Postgres 16, Redis 7, Python 3.11+, k6 for load. Planner runs deterministically without an LLM key. Live LLM explanations are future work; `OPENAI_API_KEY` currently adds a narration-availability marker without making a provider call.
 - Latency definitions: enqueue p95 is HTTP request-start to response; first-offer p95 is accepted enqueue to committed offer row. Both require sample size, warm-up, and machine context in the report.
 - Error codes: `ORDER_STATE_CONFLICT`, `ORDER_NOT_FOUND`, `RIDER_NOT_FOUND`, `RIDER_STATE_CONFLICT`, `ASSIGNMENT_NOT_FOUND`, `ASSIGNMENT_STATE_CONFLICT`, `PROPOSAL_NOT_FOUND`, `PROPOSAL_STATE_CONFLICT`, `PROPOSAL_NOT_COMMITTABLE`, `IDEMPOTENCY_KEY_REUSED`, `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`.
 

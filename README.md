@@ -1,6 +1,24 @@
 # Swiggy Dispatch Copilot
 
-A local, synthetic dark-kitchen dispatch system: a Go service owns order orchestration and assignment correctness, while a Python planner proposes rider reassignments that only the Go service can commit. **The agent suggests; the typed service decides.** This is an independent engineering project with generated data, not a connection to any production food-delivery system.
+Go dispatch service with concurrency-safe rider assignment, idempotent APIs, and an AI planner that can only propose changes.
+
+[![CI](https://github.com/Vedant817/swiggy-dispatch-copilot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Vedant817/swiggy-dispatch-copilot/actions/workflows/ci.yml)
+[![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](go/go.mod)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+This is an independent engineering project using synthetic data, not affiliated with or connected to Swiggy or any production food-delivery system. **The agent suggests; the typed service decides.**
+
+## Results
+
+Local k6 run on 2026-10-25, using the unchanged workload for 60 seconds on Windows / Intel i7-13700HX (16 cores, 24 logical processors; 16,858,472,448 bytes host RAM):
+
+| Setup | Request rate | HTTP p50 / p95 / p99 | HTTP error rate | Outcome |
+| --- | --- | --- | --- | --- |
+| 1 VU, 20,000 synthetic riders | `78.387033/s` | `8.83ms` / `27.94ms` / `32.38ms` | `0.25%` (12 / 4704) | All configured thresholds passed |
+| 10 VUs, 20,000 synthetic riders | `569.333019/s` | `12.08ms` / `37.59ms` / `44.88ms` | `3.92%` (1341 / 34196) | Error threshold failed |
+| 10 VUs, default 120 riders | `811.096848/s` | `11.65ms` / `18.65ms` / `28.26ms` | `24.03%` (11708 / 48716) | Error threshold failed; fleet exhausted |
+
+The 1-VU baseline passed the script's `<1%` HTTP error threshold, with 12 failed assignment checks; it was not error-free. A passing 10-VU run was **not** obtained: concurrent requests can select the same rider and return `409 RIDER_STATE_CONFLICT`. Rates count all HTTP operations, including failures, rather than successful dispatches. Latency includes error responses. [Methodology, machine details, exact k6 output and raw JSON](docs/LOAD_RESULTS.md) include all three runs and their limitations.
 
 ## What it does
 
@@ -34,24 +52,40 @@ Ops user ──explicit confirmation──> Go policy gate ──> PostgreSQL
 
 Correctness rules: at most one active assignment per order and per rider (capacity 1, DB-enforced); Redis leases coordinate but never substitute for a commit; offers and retry intent survive worker restarts; proposal creation never mutates assignments.
 
+## Correctness guarantees
+
+- **No double-booking:** [partial unique indexes](go/internal/store/migrations/003_indexes.sql) allow at most one `offered` or `accepted` assignment per order and per rider (capacity 1).
+- **Atomic assignment transitions:** [assignment transactions](go/internal/assign/service.go) use `SELECT ... FOR UPDATE` on orders/assignments, recheck state, and claim riders with a conditional update. [Proposal commits](go/internal/api/commit.go) lock and validate the proposal, order, assignment and target rider before committing.
+- **Redis only coordinates:** [token-owned Redis leases](go/internal/redisx/redisx.go) reduce duplicate assignment attempts; [TryAssign](go/internal/assign/service.go) revalidates inside PostgreSQL even when Redis fails. PostgreSQL transactions and constraints enforce correctness.
+- **Request replay protection:** [Idempotency-Key handling](go/internal/api/middleware.go) and the [durable claim/response store](go/internal/store/repos.go) scope keys to method, route and target; changed payloads conflict. [Order creation](go/internal/store/orders_atomic.go) and [customer cancellation](go/internal/store/cancel.go) commit state and replay responses in one transaction. Other routes use claims with stale-claim cleanup; this is not a blanket exactly-once guarantee after crashes.
+- **Webhook deduplication:** the [webhook ledger](go/internal/api/webhook.go) serializes same-key requests with a transaction advisory lock, checks the normalized payload hash, and commits side effects plus the recorded response atomically. Identical replays return the recorded response; changed payloads return 409.
+
 ## Quickstart
 
-Prerequisites: Go 1.25, Python 3.11+, Docker with Compose, `curl`, and (for `make load`) k6.
+Prerequisites: Go 1.25, Python 3.11+, Docker with Compose, Make, `curl`, and (for `make load`) k6. Commands below use Bash and start from the repository root. PowerShell uses `$env:NAME='value'` instead of `export NAME='value'`. See [.env.example](.env.example) for configuration; `go run` does not automatically load that file.
 
 ```bash
-# 1. Start Postgres + Redis, then the API (migrations run on boot)
+# Terminal 1: Start Postgres + Redis, then API (migrations run on boot)
 docker compose up -d postgres redis
+export DATABASE_URL='postgres://dispatch:dispatch@127.0.0.1:5432/dispatch?sslmode=disable'
+export REDIS_ADDR='127.0.0.1:6379'
+export APP_ENV=local
 cd go && go run ./cmd/api        # :8080, worker loop in-process
 # (optional) standalone worker: go run ./cmd/worker
+```
 
-# 2. Seed a world and send traffic
-go run ./cmd/gen world  --config ../configs/default.yaml
-go run ./cmd/gen traffic --config ../configs/default.yaml --duration 60s
+```bash
+# Terminal 2, from repository root: seed a world and send traffic
+cd go
+go run ./cmd/gen world
+go run ./cmd/gen --config ../configs/default.yaml --duration 60s traffic
 
 # 3. Plan a reassignment (needs an offering order id)
+python -m pip install httpx pydantic pyyaml
 cd ../agent && python -m app.main --goal "reassign stalled VIP order" --order <ORDER_ID> --auto-confirm
 
-# 4. Verify
+# 4. Verify, from the repository root (test DB setup below)
+cd ..
 make test        # Go unit + integration (serial, needs DB)
 make race        # go test -race (Linux toolchain; on Windows use: make race-docker)
 make eval        # 24 generated scenarios + 8 agent trajectories
@@ -83,18 +117,35 @@ JSON everywhere; `X-Request-Id` echoed; mutating routes accept `Idempotency-Key`
 
 Errors look like `{"code":"ORDER_STATE_CONFLICT","message":"...","request_id":"..."}` with stable codes (`ORDER/RIDER/ASSIGNMENT/PROPOSAL_*`, `IDEMPOTENCY_KEY_REUSED`, `VALIDATION_ERROR`, …).
 
-## Verification and metrics
+## Testing
 
-| Measure | Target | Measured |
-| --- | --- | --- |
-| Assignment create p95 (HTTP, 10-way concurrent, n=67 offered + warm-up 10, Windows, `go run` dev, 10 rest/120 riders) | < 100 ms | 19.0 ms |
-| Assign-call p95 (HTTP, same run, 0 failures, 33 backpressure rejections at fleet capacity) | < 500 ms | 32.2 ms |
-| Generated Go eval suite | ≥ 85% | 24/24 (1.00), 0 double-assigns |
-| Agent trajectory eval | ≥ 85% | 8/8 (1.00), exact tool subset |
-| Go race detector | clean | clean via `make race-docker` (Linux); contention tests green locally |
-| Duplicate webhook side effects | 0 | tested: replay returns original, hash mismatch 409 |
+**38 top-level Go tests**, counted with `go test -list '^Test' ./...` in `go/` (subtests excluded). On 2026-10-25, all 38 passed without test skips using a separate disposable PostgreSQL database and real Redis: `go test -json -p 1 ./... -count=1`.
 
-`go test -race` needs a Linux C toolchain — on Windows run `make race-docker`. The k6 script (`load/assign_latency.js`, `make load`) covers the same thresholds; `go/cmd/load` (`go run ./cmd/load --concurrency 10 --count 100`) is the executed runner — report in `load/report.json` with warm-up, samples, failures, and machine context.
+Run from the repository root in Bash (PowerShell: use `$env:TEST_DATABASE_URL='...'` for the environment assignment):
+
+```bash
+docker compose up -d postgres redis
+# Create this disposable test database once; never use a production database.
+docker compose exec -T postgres createdb -U dispatch dispatch_test
+export TEST_DATABASE_URL='postgres://dispatch:dispatch@127.0.0.1:5432/dispatch_test?sslmode=disable'
+export REDIS_ADDR='127.0.0.1:6379'
+make test
+(cd go && go test -list '^Test' ./...)
+(cd go && go vet ./...)
+make race          # requires a supported CGO C compiler
+# Windows alternative, Linux container; uses the disposable local dispatch DB:
+make race-docker  # stop API/worker first: these tests reset their database
+
+# With the local API running (these scenarios reset synthetic state):
+python -m pip install httpx pydantic pyyaml pytest
+make eval
+(cd agent && python -m pytest tests -q)
+
+# k6 workload, setup and measured results: docs/LOAD_RESULTS.md
+make load VUS=10 DURATION=60s
+```
+
+Database-dependent Go tests skip without `TEST_DATABASE_URL` or when `APP_ENV=prod`; a run with skips is not integration acceptance. CI runs build, vet, Go tests with the race detector, generated Go/agent evaluations, agent unit tests, and a production-mode Docker authorization/workflow smoke test. The evaluation gates require at least 85% passing scenarios and zero double-assignments. These are local/CI checks; no hosted deployment is claimed.
 
 ## Demo script
 
@@ -124,7 +175,7 @@ BASE_URL=http://127.0.0.1:8080 bash scripts/demo.sh
 
 ## Limits
 
-- Single-capacity riders, one metro bounding box, bbox (not GEO) candidate search in MVP.
-- No real payments, auth is local shared tokens, admin routes are test-only.
+- Single-capacity riders in one metro bounding box; candidates are bounded by availability/rating, then scored by distance, load, rating and priority. No spatial index or global optimizer.
+- No real payments or customer identity system. Role-specific shared tokens protect production mode; admin routes are local-only.
 - No managed TLS ingress, credential rotation, off-host backup retention/PITR, multi-region failover, or production incident runbook is supplied in this repository. The local restore drill, Docker checks and GitHub Actions evidence do not prove a hosted rollout.
-- Agent heuristic picks the first available non-current rider (grounded, not optimal); LLM narration is optional and never authoritative.
+- The planner is a deterministic heuristic that picks the first available non-current rider (grounded, not optimal). Live LLM integration/narration is future work: setting `OPENAI_API_KEY` currently adds a marker, without making a provider call.
